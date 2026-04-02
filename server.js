@@ -8,7 +8,7 @@ const axios = require('axios');
 const md5 = require('md5');
 
 const { parseExcel } = require('./src/utils/excel-parser');
-const { runBatch } = require('./src/workers/batch-runner');
+const { runBatch, abortBatch } = require('./src/workers/batch-runner');
 const { startProfile } = require('./src/services/multilogin');
 
 const app = express();
@@ -138,8 +138,11 @@ app.post('/api/start', (req, res) => {
 });
 
 // Stop batch
-app.post('/api/stop', (req, res) => {
-  isRunning = false;
+app.post('/api/stop', async (req, res) => {
+  if (isRunning) {
+    isRunning = false;
+  }
+  await abortBatch(); // Kill all background multilogin scripts and queue immediately
   io.emit('batch:stopped', {});
   res.json({ success: true });
 });

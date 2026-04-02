@@ -81,7 +81,7 @@ async function startProfile(folderId, profileId, email, password) {
 async function forceStop(folderId, profileId, token) {
   try {
     await axios.get(
-      `${LAUNCHER}/api/v2/profile/f/${folderId}/p/${profileId}/stop`,
+      `${LAUNCHER}/api/v1/profile/stop/p/${profileId}`,
       { headers: {
           'Content-Type': 'application/json',
           'Accept': 'application/json',
@@ -102,7 +102,7 @@ async function stopProfile(folderId, profileId, email, password) {
   try {
     const token = await getToken(email, password);
     await axios.get(
-      `${LAUNCHER}/api/v2/profile/f/${folderId}/p/${profileId}/stop`,
+      `${LAUNCHER}/api/v1/profile/stop/p/${profileId}`,
       { headers: { Authorization: `Bearer ${token}` }, httpsAgent }
     );
     console.log(`[MLX] Profile ...${profileId.slice(-8)} stopped`);
@@ -111,4 +111,24 @@ async function stopProfile(folderId, profileId, email, password) {
   }
 }
 
-module.exports = { startProfile, stopProfile, getToken };
+// Stop ALL running instances of Multilogin profiles unconditionally
+async function stopAllProfiles(tokenOrEmail, password) {
+  try {
+    let token = tokenOrEmail;
+    if (password) {
+      token = await getToken(tokenOrEmail, password);
+    } else if (!token) {
+      token = await getToken();
+    }
+    
+    await axios.get(
+      `${LAUNCHER}/api/v1/profile/stop_all?type=all`,
+      { headers: { Authorization: `Bearer ${token}` }, httpsAgent }
+    );
+    console.log(`[MLX] 🛑 ALL Profiles stopped successfully via stop_all API`);
+  } catch (err) {
+    console.warn(`[MLX] Stop All Warning:`, err.message);
+  }
+}
+
+module.exports = { startProfile, stopProfile, forceStop, stopAllProfiles, getToken };

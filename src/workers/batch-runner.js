@@ -1,11 +1,20 @@
-const { startProfile, stopProfile } = require('../services/multilogin');
+const { startProfile, stopProfile, stopAllProfiles } = require('../services/multilogin');
 const { runPurchase } = require('../services/shein-automation');
+
+let abortFlag = false;
+
+async function abortBatch() {
+  abortFlag = true;
+  console.log(`[Batch] 🛑 Abort signal dispatched, clearing queue and terminating browsers...`);
+  await stopAllProfiles(); 
+}
 
 /**
  * Queue-based batch runner with concurrency control.
  * Each task = { taskId, product, profile: { folderId, profileId, label } }
  */
 async function runBatch({ tasks, concurrency = 3, credentials, onTaskUpdate }) {
+  abortFlag = false;
   const queue = [...tasks];
   const running = new Set();
 
@@ -73,6 +82,10 @@ async function runBatch({ tasks, concurrency = 3, credentials, onTaskUpdate }) {
 
   return new Promise((resolve) => {
     function tryStartNext() {
+      if (abortFlag) {
+        queue.length = 0; // instantly clear pending jobs
+      }
+
       while (running.size < concurrency && queue.length > 0) {
         const task = queue.shift();
         running.add(task.taskId);
@@ -81,10 +94,12 @@ async function runBatch({ tasks, concurrency = 3, credentials, onTaskUpdate }) {
           if (running.size === 0 && queue.length === 0) resolve();
         });
       }
-      if (running.size === 0 && queue.length === 0) resolve();
+      if (running.size === 0 && queue.length === 0) {
+        resolve();
+      }
     }
     tryStartNext();
   });
 }
 
-module.exports = { runBatch };
+module.exports = { runBatch, abortBatch };

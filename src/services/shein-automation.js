@@ -1,5 +1,28 @@
 const { chromium } = require('playwright');
 const { parseShippingAddress } = require('../utils/address-parser');
+const path = require('path');
+const fs = require('fs');
+
+// Debug Screenshot Helper
+async function takeDebugScreenshot(page, stepName, log, productTitle = 'unknown') {
+  try {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const safeTitle = productTitle.replace(/[^a-z0-9]/gi, '_').substring(0, 30) || 'no_title';
+    const folderPath = path.join(process.cwd(), 'screenshots');
+    
+    if (!fs.existsSync(folderPath)) {
+      fs.mkdirSync(folderPath, { recursive: true });
+    }
+    
+    const fileName = `${timestamp}_${safeTitle}_${stepName}.png`;
+    const filePath = path.join(folderPath, fileName);
+    
+    await page.screenshot({ path: filePath, fullPage: true });
+    log(`📸 Screenshot saved: ${fileName}`);
+  } catch (err) {
+    log(`⚠️ Could not take screenshot: ${err.message}`);
+  }
+}
 
 const CAPTCHA_RETRY_LIMIT = 3;
 
@@ -16,6 +39,24 @@ async function humanType(page, selector, text) {
   }
 }
 
+// Dismiss promotional overlays safely using text detection
+async function dismissPromotionDialog(page, log) {
+  try {
+    const hasPromo = await page.evaluate(() => {
+      const text = document.body.innerText;
+      return text.includes('Promotion Savings') || 
+             text.includes('Are you sure you want to leave') || 
+             text.includes('CONTINUE CHECKING OUT');
+    }).catch(() => false);
+
+    if (hasPromo) {
+       log(`🛑 Promotion popup detected. Sending ESC to dismiss...`);
+       await page.keyboard.press('Escape');
+       await new Promise(r => setTimeout(r, 600)); 
+    }
+  } catch(e) {}
+}
+
 // Detect if CAPTCHA is present on page
 async function hasCaptcha(page) {
   try {
@@ -25,6 +66,7 @@ async function hasCaptcha(page) {
       '[id*="captcha"]',
       '.bots-tip',
       '.captcha-container',
+      '.geetest_panel_box'
     ];
     for (const sel of captchaSelectors) {
       const el = await page.$(sel);
@@ -124,10 +166,26 @@ async function selectSize(page, sizeName, log) {
 // Extract product title from detail page
 async function getProductTitle(page, log) {
   try {
-    const titleLocator = page.locator('h1.product-intro__head-name > span.fsp-element').first();
-    await titleLocator.waitFor({ timeout: 5000 });
-    const title = await titleLocator.textContent();
-    const cleanTitle = (title || '').trim();
+    let title = '';
+    const titleLocator = page.locator('h1.product-intro__head-name > span.fsp-element, h1.fsp-element, h1[class*="product-intro"]').first();
+    
+    try {
+      // Chờ h1 hiển thị (nhưng không được thêm thẻ <title> vào đây vì title luôn bị hidden)
+      await titleLocator.waitFor({ state: 'visible', timeout: 3000 });
+      title = await titleLocator.textContent();
+    } catch (e) {
+      // Bỏ qua lỗi timeout nếu không tìm thấy h1
+    }
+    
+    let cleanTitle = (title || '').trim();
+    
+    // Nếu h1 không lấy được, Fallback lấy trực tiếp Title của cả trang web
+    if (!cleanTitle) {
+      const pageTitle = await page.title(); // Dùng hàm gốc của Playwright
+      // Cắt bỏ phần hậu tố rác của web (ví dụ: "Áo sơ mi ... | SHEIN USA")
+      cleanTitle = pageTitle.split('|')[0].replace('SHEIN', '').trim();
+    }
+
     if (cleanTitle) log(`🏷️ Product Title detected: "${cleanTitle}"`);
     return cleanTitle;
   } catch (err) {
@@ -185,18 +243,28 @@ async function setCartItemQuantity(page, qty, log) {
     const qtyInput = page.locator('.bsc-cart-item-goods-qty__input').first();
     await qtyInput.waitFor({ state: 'visible', timeout: 5000 });
     
-    // Clear out value using triple click to highlight all contents
+    // Bỏ thuộc tính readonly (nếu có)
+    await qtyInput.evaluate(node => node.removeAttribute('readonly')).catch(() => false);
+
+    // Cách xóa cũ đã hoạt động ổn định: click 3 lần và Backspace
     await qtyInput.click({ clickCount: 3 });
-    await page.keyboard.press('Backspace');
+    await qtyInput.press('Backspace');
     await humanDelay(200, 400);
     
-    // Fill new value and hit enter
-    await qtyInput.fill(String(qty));
-    await humanDelay(200, 400);
-    await page.keyboard.press('Enter');
+    // Điền số chậm
+    await qtyInput.pressSequentially(String(qty), { delay: 150 });
+    await humanDelay(500, 1000);
+    
+    // Ấn Enter BẮT ĐÍCH DANH lúc Input đang Focus (để trigger Loading trên Web)
+    await qtyInput.press('Enter');
+    
+    // Nhả focus bằng cách click ra chỗ trống
+    await page.mouse.click(10, 10);
     
     log(`✅ Quantity set to ${qty}`);
-    await humanDelay(1500, 3000); // Give Shein network time to update cart totals
+    
+    // Trễ cố định để chờ Loading UI trên web
+    await humanDelay(4000, 5000); 
   } catch(err) {
     log(`⚠️ Could not modify cart quantity: ${err.message}`);
   }
@@ -229,6 +297,7 @@ async function runPurchase({ browserURL, product, folderId, profileId, log }) {
 
     // Step 4: Add to Cart (Directly)
     log(`🛒 Clicking Add to Cart...`);
+    await dismissPromotionDialog(page, log);
     const addToCartBtn = page.locator('button:has-text("Add to Bag"), button:has-text("Add to Cart"), .add-to-cart, [class*="add-btn"]').first();
     await addToCartBtn.waitFor({ timeout: 10000 });
     await addToCartBtn.click();
@@ -237,6 +306,7 @@ async function runPurchase({ browserURL, product, folderId, profileId, log }) {
     log(`✅ Added to cart, navigating to Cart page...`);
 
     // Step 5: Go to Cart via header icon
+    await dismissPromotionDialog(page, log);
     const cartIcon = page.locator('.bsc-mini-cart__trigger, [class*="mini-cart"], a[href*="cart"]').first();
     await cartIcon.waitFor({ timeout: 10000 });
     await cartIcon.click();
@@ -253,6 +323,7 @@ async function runPurchase({ browserURL, product, folderId, profileId, log }) {
 
     // Step 7: Proceed to Checkout from Cart
     log(`📲 Clicking Checkout in Cart...`);
+    await dismissPromotionDialog(page, log);
     const checkoutBtnCart = page.locator('.j-cart-check').first();
     await checkoutBtnCart.waitFor({ timeout: 10000 });
     await checkoutBtnCart.click();
@@ -266,14 +337,16 @@ async function runPurchase({ browserURL, product, folderId, profileId, log }) {
     // Step 8: Handle shipping address
     log(`📦 Managing shipping address for: ${addr.firstName} ${addr.lastName}`);
     // NOTE: Placeholder - will navigate and fill address
-    await handleShippingAddress(page, addr, log);
+    await handleShippingAddress(page, addr, log, productTitle);
 
     // Step 9: Final Place Order (on Checkout Page)
     log(`🎯 Placing order...`);
+    await dismissPromotionDialog(page, log);
     const placeOrderBtn = page.locator('button:has-text("Place Order"), button:has-text("Continue"), [class*="place-order"]').first();
     await placeOrderBtn.waitFor({ timeout: 15000 });
     await placeOrderBtn.click();
     await humanDelay(3000, 5000);
+    await takeDebugScreenshot(page, 'final_place_order', log, productTitle);
 
     log(`✅ Order placed successfully!`);
     return { success: true };
@@ -282,61 +355,139 @@ async function runPurchase({ browserURL, product, folderId, profileId, log }) {
     log(`❌ Error: ${err.message}`);
     return { success: false, error: err.message };
   } finally {
-    await page.close().catch(() => {});
+    // await page.close().catch(() => {});
   }
 }
 
 // Shipping address handler
-async function handleShippingAddress(page, addr, log) {
+async function handleShippingAddress(page, addr, log, productTitle) {
   log(`📝 [Address] Editing address for: ${addr.firstName} ${addr.lastName}`);
   try {
-    // 1. Locate and click Edit Address button
+    // 1. Locate and click Edit Address button with Retry Mechanism
     const editBtn = page.locator('button.main-address-right').first();
-    await editBtn.waitFor({ state: 'visible', timeout: 10000 });
-    await editBtn.click();
-    await humanDelay(1500, 2500);
+    await editBtn.waitFor({ state: 'visible', timeout: 10000 }).catch(() => {});
+    
+    let dialogAppeared = false;
+    const dialogSelector = 'div.sui-business-address';
+    
+    for (let attempts = 0; attempts < 5; attempts++) {
+      if (attempts > 0) {
+        log(`🔄 Address dialog not detected. Retrying click... (${attempts}/5)`);
+        await humanDelay(4000, 6000); // Wait 2s before retrying
+      }
+      
+      try {
+        await dismissPromotionDialog(page, log);
+        await editBtn.click({ timeout: 5000 });
+      } catch (err) {
+        log(`⚠️ Could not click edit button: ${err.message}`);
+      }
+      
+      try {
+        // Wait max 1 second for the dialog to show up
+        const dialog = page.locator(dialogSelector).first();
+        await dialog.waitFor({ state: 'visible', timeout: 1000 });
+        dialogAppeared = true;
+        log(`✅ Address modal appeared successfully.`);
+        break; 
+      } catch (e) {
+        // Timed out, loop will restart
+      }
+    }
+    
+    if (!dialogAppeared) {
+      await takeDebugScreenshot(page, 'edit_modal_failed', log, productTitle);
+      throw new Error(`Address dialog (${dialogSelector}) did not appear after 5 retries.`);
+    }
+
+    await humanDelay(1000, 1500);
 
     // 2. Fill First and Last Name
-    const firstNameInput = page.locator('.sui-input-title__bd:has(span:has-text("First Name")) input').first();
-    await firstNameInput.fill(addr.firstName);
+    const firstNameHandle = await page.waitForFunction(() => {
+      const spans = Array.from(document.querySelectorAll('span'));
+      for (const span of spans) {
+        // Use trim() to remove weird whitespace, check start
+        const txt = span.textContent.trim();
+        if (txt.startsWith('First Name') || txt.startsWith('First')) {
+          // Bỏ chữ :not([readonly]) đi vì Shein cố tình cài attribute readonly vào toàn bộ form
+          const input = span.parentElement.querySelector('input');
+          if (input) {
+            const rect = input.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0) return input;
+          }
+        }
+      }
+      return null;
+    }, { timeout: 15000 }).catch(async () => {
+      await takeDebugScreenshot(page, 'firstname_js_not_found', log, productTitle);
+      throw new Error("First Name input not found via JS querySelector. Check console for HTML dump.");
+    });
+    
+    // TIÊU DIỆT SỰC CẢN TRỞ READONLY CỦA SHEIN:
+    // Cưỡng chế xoá thuộc tính readonly bằng Raw JS rồi mới gõ
+    await firstNameHandle.evaluate(node => node.removeAttribute('readonly'));
+    await dismissPromotionDialog(page, log);
+    await firstNameHandle.focus();
+    await firstNameHandle.fill(addr.firstName);
     await humanDelay(300, 600);
     
-    const lastNameInput = page.locator('.sui-input-title__bd:has(span:has-text("Last Name")) input').first();
+    const lastNameInput = page.locator('span:visible:has-text("Last Name") + input, span:visible:has-text("Last") + input').first();
+    await lastNameInput.evaluate(node => node.removeAttribute('readonly')).catch(()=>false);
+    await dismissPromotionDialog(page, log);
     await lastNameInput.fill(addr.lastName);
     await humanDelay(300, 600);
-
+    
+    const phoneInput = page.locator('span:visible:has-text("Phone Number") + input, span:visible:has-text("Phone") + input').first();
+    await phoneInput.evaluate(node => node.removeAttribute('readonly')).catch(()=>false);
+    await dismissPromotionDialog(page, log);
+    await phoneInput.fill(addr.phone);
+    await humanDelay(300, 600);
     // 3. Search Address Input
-    const searchInput = page.locator('input.addr-search-content__core').first();
+    const searchInput = page.locator('input.addr-search-content__core:visible').first();
+    await searchInput.evaluate(node => node.removeAttribute('readonly')).catch(()=>false);
     const query = `${addr.detailedAddress} ${addr.zip}`;
     log(`🔍 Searching address dropdown for: ${query}`);
+    await dismissPromotionDialog(page, log);
     await searchInput.fill(query);
-    await humanDelay(1000, 2000); // Wait for the network request/dropdown to render
-
+    await humanDelay(1500, 2500);
+    
     // 4. Dropdown Selection: wait for the visible ul that contains list items, select first item
     const firstResult = page.locator('ul.search-result__container#associate-listbox:visible > li').first();
-    await firstResult.waitFor({ state: 'visible', timeout: 10000 });
-    await firstResult.click();
-    await humanDelay(1000, 2000);
+    await firstResult.waitFor({ state: 'visible', timeout: 10000 }).catch(async () => {
+      await takeDebugScreenshot(page, 'address_dropdown_timeout', log, productTitle);
+      throw new Error("Address suggestions dropdown did not appear.");
+    });
+    const hasOptions = await firstResult.isVisible().catch(() => false);
+    if (hasOptions) {
+      log(`☑️ Selected first address suggestion`);
+      await dismissPromotionDialog(page, log);
+      await firstResult.click();
+      await humanDelay(1000, 2000);
+    } else {
+      log(`⚠️ No auto-complete options appeared for address search.`);
+    }
 
     // 5. Explicit Street Address Override
-    // Shein autocomplete fills multiple fields, but we forcefully override street to detailedAddress
     const streetInput = page.locator('.sui-textarea-title:has(span:has-text("Street address")) textarea').first();
+    await streetInput.evaluate(node => node.removeAttribute('readonly')).catch(()=>false);
+    await dismissPromotionDialog(page, log);
     await streetInput.click({ clickCount: 3 }); // highlight to delete
     await page.keyboard.press('Backspace');
-    await humanDelay(200, 400);
-    
-    // Type the actual detailed address directly
+    await humanDelay(500, 1000);
+    await dismissPromotionDialog(page, log);
     await streetInput.fill(addr.detailedAddress);
     await humanDelay(500, 1000);
 
     // 6. Save the Form
-    const saveBtn = page.locator('button.save').first();
+    const saveBtn = page.locator('button.save:visible').first();
+    await dismissPromotionDialog(page, log);
     await saveBtn.click();
     await humanDelay(2000, 4000);
     
     log(`✅ Specific address details configured and saved.`);
   } catch (err) {
     log(`⚠️ Error in handleShippingAddress: ${err.message}`);
+    await takeDebugScreenshot(page, 'address_error_fallback', log, productTitle);
     // Not throwing here in case address edit wasn't strictly mandatory or it already existed.
   }
 }

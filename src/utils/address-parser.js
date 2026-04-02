@@ -24,8 +24,9 @@ function parseShippingAddress(raw) {
   const detailedAddress = addressParts.length > 3 ? addressParts.slice(3).join(', ') : '';
   
   // 3. Process Phone
-  const phone = lines[2] || '';
-  
+  let phone = lines[2] || '';
+  // Xóa mã quốc gia ở đầu như (+1), (+84) nếu có
+  phone = phone.replace(/^\(\+\d+\)/, '').trim();  
   // 4. Process Zip (Extract digits from "Postal Code 61548")
   const zipRaw = lines[3] || '';
   const zipMatch = zipRaw.match(/\d+/);
