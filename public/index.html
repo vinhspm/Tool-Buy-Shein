@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Shein Auto-Buy · Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: { 50:'#fff0f3', 100:'#ffe0e8', 200:'#ffc2d4', 300:'#ff8fab', 400:'#ff5f8d', 500:'#e63462', 600:'#c8184e', 700:'#a5113e', 800:'#8a1136', 900:'#741031' },
+            surface: { DEFAULT:'#0f0f13', 1:'#17171e', 2:'#1f1f28' },
+          },
+          fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'] },
+        }
+      }
+    };
+  </script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body class="bg-surface text-slate-200 font-sans min-h-screen">
+
+  <!-- Header -->
+  <header class="border-b border-white/10 bg-surface-1 sticky top-0 z-50 backdrop-blur-sm">
+    <div class="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <div class="w-9 h-9 bg-brand-500 rounded-xl flex items-center justify-center shadow-lg shadow-brand-500/30">
+          <svg class="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z"/></svg>
+        </div>
+        <div>
+          <h1 class="text-base font-semibold text-white leading-none">Shein Auto-Buy</h1>
+          <p class="text-xs text-slate-500 mt-0.5">Multilogin + Playwright</p>
+        </div>
+      </div>
+      <div class="flex items-center gap-3">
+        <div class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-surface-2 border border-white/10 text-xs text-slate-400">
+          <span class="w-2 h-2 rounded-full bg-slate-600 inline-block" id="status-dot"></span>
+          <span id="status-text">Idle</span>
+        </div>
+        <button onclick="showTab('settings')" class="w-9 h-9 rounded-xl bg-surface-2 border border-white/10 hover:border-white/20 flex items-center justify-center transition-all">
+          <svg class="w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Tab Nav -->
+  <div class="max-w-7xl mx-auto px-6 pt-6">
+    <div class="flex gap-1 bg-surface-1 p-1 rounded-xl border border-white/10 w-fit">
+      <button onclick="showTab('dashboard')" id="tab-dashboard" class="tab-btn active px-4 py-2 text-sm rounded-lg font-medium transition-all">📊 Dashboard</button>
+      <button onclick="showTab('upload')"    id="tab-upload"    class="tab-btn px-4 py-2 text-sm rounded-lg font-medium transition-all">📁 Upload Excel</button>
+      <button onclick="showTab('profiles')"  id="tab-profiles"  class="tab-btn px-4 py-2 text-sm rounded-lg font-medium transition-all">👤 Profiles</button>
+      <button onclick="showTab('settings')"  id="tab-settings"  class="tab-btn px-4 py-2 text-sm rounded-lg font-medium transition-all">⚙️ Settings</button>
+    </div>
+  </div>
+
+  <main class="max-w-7xl mx-auto px-6 py-6 space-y-6">
+
+    <!-- ── DASHBOARD TAB ── -->
+    <section id="tab-content-dashboard" class="tab-content space-y-6">
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div class="stat-card bg-surface-1 border border-white/10 rounded-2xl p-5">
+          <div class="text-xs text-slate-500 font-medium uppercase tracking-wider">Total Tasks</div>
+          <div class="text-3xl font-bold text-white mt-1" id="stat-total">0</div>
+        </div>
+        <div class="stat-card bg-surface-1 border border-white/10 rounded-2xl p-5">
+          <div class="text-xs text-slate-500 font-medium uppercase tracking-wider">Running</div>
+          <div class="text-3xl font-bold text-blue-400 mt-1" id="stat-running">0</div>
+        </div>
+        <div class="stat-card bg-surface-1 border border-white/10 rounded-2xl p-5">
+          <div class="text-xs text-slate-500 font-medium uppercase tracking-wider">Success</div>
+          <div class="text-3xl font-bold text-emerald-400 mt-1" id="stat-success">0</div>
+        </div>
+        <div class="stat-card bg-surface-1 border border-white/10 rounded-2xl p-5">
+          <div class="text-xs text-slate-500 font-medium uppercase tracking-wider">Failed</div>
+          <div class="text-3xl font-bold text-red-400 mt-1" id="stat-failed">0</div>
+        </div>
+      </div>
+
+      <div class="bg-surface-1 border border-white/10 rounded-2xl p-5">
+        <div class="flex items-center justify-between mb-3">
+          <span class="text-sm font-medium text-slate-300">Overall Progress</span>
+          <span id="progress-text" class="text-sm text-slate-400">0 / 0</span>
+        </div>
+        <div class="w-full bg-surface-2 rounded-full h-2.5">
+          <div id="progress-bar" class="bg-gradient-to-r from-brand-500 to-brand-400 h-2.5 rounded-full transition-all duration-500" style="width:0%"></div>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-3">
+        <button id="btn-start" onclick="startBatch()" class="flex items-center gap-2 px-6 py-3 bg-brand-500 hover:bg-brand-400 text-white font-semibold rounded-xl transition-all shadow-lg shadow-brand-500/30 disabled:opacity-50">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+          Start Batch
+        </button>
+        <button onclick="stopBatch()" class="flex items-center gap-2 px-6 py-3 bg-surface-2 border border-white/10 hover:border-white/20 text-slate-300 font-semibold rounded-xl transition-all">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0zM9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"/></svg>
+          Stop
+        </button>
+        <button onclick="clearTasks()" class="px-6 py-3 bg-surface-2 border border-white/10 hover:border-white/20 text-slate-400 rounded-xl transition-all text-sm">Clear Logs</button>
+      </div>
+
+      <div id="task-grid" class="space-y-2"></div>
+      <div id="empty-state" class="flex flex-col items-center justify-center py-24 text-center">
+        <div class="w-16 h-16 bg-surface-2 rounded-2xl flex items-center justify-center mb-4">
+          <svg class="w-8 h-8 text-slate-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>
+        </div>
+        <p class="text-slate-500 font-medium">No tasks yet</p>
+        <p class="text-slate-600 text-sm mt-1">Upload an Excel file and configure profiles to begin</p>
+      </div>
+    </section>
+
+    <!-- ── UPLOAD TAB ── -->
+    <section id="tab-content-upload" class="tab-content hidden space-y-6">
+      <div class="bg-surface-1 border border-white/10 rounded-2xl p-8">
+        <h2 class="text-lg font-semibold text-white mb-2">Upload Product List</h2>
+        <p class="text-sm text-slate-500 mb-6">Excel file với các cột: <code class="bg-surface-2 px-2 py-0.5 rounded text-slate-300">product_url, color, size, quantity, shipping_address</code></p>
+
+        <div id="drop-zone" class="border-2 border-dashed border-white/20 hover:border-brand-500/50 rounded-2xl p-12 text-center cursor-pointer transition-all group" onclick="document.getElementById('file-input').click()">
+          <div class="w-14 h-14 bg-surface-2 group-hover:bg-brand-500/10 rounded-2xl flex items-center justify-center mx-auto mb-4 transition-all">
+            <svg class="w-7 h-7 text-slate-500 group-hover:text-brand-400 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/></svg>
+          </div>
+          <p class="text-slate-300 font-medium">Drop your .xlsx file here</p>
+          <p class="text-slate-600 text-sm mt-1">or click to browse</p>
+        </div>
+        <input type="file" id="file-input" accept=".xlsx,.xls" class="hidden" onchange="uploadFile(this)" />
+
+        <div id="excel-preview" class="hidden mt-6">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="text-sm font-semibold text-slate-300" id="preview-title">Preview</h3>
+            <span id="preview-count" class="text-xs text-slate-500"></span>
+          </div>
+          <div class="overflow-x-auto rounded-xl border border-white/10">
+            <table class="w-full text-sm">
+              <thead>
+                <tr class="border-b border-white/10 bg-surface-2">
+                  <th class="px-4 py-3 text-left text-xs text-slate-500 font-medium">#</th>
+                  <th class="px-4 py-3 text-left text-xs text-slate-500 font-medium">Product URL</th>
+                  <th class="px-4 py-3 text-left text-xs text-slate-500 font-medium">Color</th>
+                  <th class="px-4 py-3 text-left text-xs text-slate-500 font-medium">Size</th>
+                  <th class="px-4 py-3 text-left text-xs text-slate-500 font-medium">Qty</th>
+                  <th class="px-4 py-3 text-left text-xs text-slate-500 font-medium">Shipping</th>
+                </tr>
+              </thead>
+              <tbody id="preview-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── PROFILES TAB ── -->
+    <section id="tab-content-profiles" class="tab-content hidden space-y-6">
+      <div class="bg-surface-1 border border-white/10 rounded-2xl p-8">
+        <h2 class="text-lg font-semibold text-white mb-1">Profile Assignment</h2>
+        <p class="text-sm text-slate-500 mb-6">Danh sách Multilogin profiles sẽ được dùng (round-robin theo thứ tự). Cần có <strong class="text-slate-300">Folder ID</strong> ở Settings.</p>
+
+        <div id="profile-list" class="space-y-3 mb-4"></div>
+
+        <button onclick="addProfileRow()" class="flex items-center gap-2 text-sm text-brand-400 hover:text-brand-300 transition-colors">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+          Add Profile
+        </button>
+
+        <div class="mt-6 pt-6 border-t border-white/10">
+          <button onclick="saveProfiles()" class="px-6 py-3 bg-brand-500 hover:bg-brand-400 text-white font-semibold rounded-xl transition-all text-sm">
+            💾 Save Profiles
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── SETTINGS TAB ── -->
+    <section id="tab-content-settings" class="tab-content hidden space-y-6">
+      <div class="bg-surface-1 border border-white/10 rounded-2xl p-8 space-y-6">
+        <div>
+          <h2 class="text-lg font-semibold text-white">Multilogin Settings</h2>
+          <p class="text-sm text-slate-500 mt-1">Thông tin đăng nhập và cấu hình batch runner.</p>
+        </div>
+
+        <div class="grid gap-4 md:grid-cols-2">
+          <div>
+            <label class="block text-sm text-slate-400 mb-2" for="cfg-email">Account Email</label>
+            <input id="cfg-email" type="email" placeholder="you@example.com" class="input-field w-full" />
+          </div>
+          <div>
+            <label class="block text-sm text-slate-400 mb-2" for="cfg-password">Password</label>
+            <input id="cfg-password" type="password" placeholder="••••••••" class="input-field w-full" />
+          </div>
+          <div>
+            <label class="block text-sm text-slate-400 mb-2" for="cfg-workspace">Workspace ID</label>
+            <div class="flex gap-2">
+              <select id="cfg-workspace" class="input-field w-full">
+                <option value="">-- Click Fetch First --</option>
+              </select>
+              <button onclick="fetchWorkspaces()" id="btn-fetch-ws" class="px-4 bg-surface-2 hover:bg-white/5 border border-white/10 rounded-xl text-sm transition-all whitespace-nowrap">
+                1. Fetch
+              </button>
+            </div>
+          </div>
+          <div>
+            <label class="block text-sm text-brand-400 mb-2" for="cfg-token">Automation Token</label>
+            <div class="flex gap-2">
+              <input id="cfg-token" type="text" placeholder="eyJ..." class="input-field w-full font-mono text-xs text-brand-300" />
+              <button onclick="generateToken()" id="btn-gen-token" class="px-4 bg-brand-600 hover:bg-brand-500 rounded-xl text-sm transition-all text-white whitespace-nowrap">
+                2. Gen Token
+              </button>
+            </div>
+          </div>
+          <div>
+            <label class="block text-sm text-slate-400 mb-2" for="cfg-folder">
+              Folder ID
+              <span class="text-xs text-slate-600 ml-1">(UUID)</span>
+            </label>
+            <input id="cfg-folder" type="text" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" class="input-field w-full font-mono text-xs" />
+          </div>
+          <div>
+            <label class="block text-sm text-slate-400 mb-2" for="cfg-concurrency">
+              Concurrency
+            </label>
+            <input id="cfg-concurrency" type="number" min="1" max="10" value="3" class="input-field w-full" />
+          </div>
+        </div>
+
+        <div class="flex items-center gap-3">
+          <button onclick="fetchProfiles()" id="btn-fetch" class="flex items-center gap-2 px-6 py-3 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-xl transition-all text-sm shadow-lg shadow-blue-600/20">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+            3. Fetch Folders & Profiles
+          </button>
+          <button onclick="saveSettings()" class="px-6 py-3 bg-surface-2 hover:bg-white/5 border border-white/10 text-white font-semibold rounded-xl transition-all text-sm">
+            💾 Save Settings
+          </button>
+        </div>
+      </div>
+
+      <!-- Discovered Folders & Profiles -->
+      <div id="mlx-folders-panel" class="hidden bg-surface-1 border border-white/10 rounded-2xl p-8">
+        <h3 class="text-base font-semibold text-white mb-1">Discovered Folders & Profiles</h3>
+        <p class="text-sm text-slate-500 mb-5">Click a folder to use its ID. Click a profile row to add it to your Profiles list.</p>
+        <div id="mlx-folders-list" class="space-y-4"></div>
+      </div>
+    </section>
+
+  </main>
+
+  <div id="toast-container" class="fixed bottom-6 right-6 space-y-2 z-50"></div>
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
