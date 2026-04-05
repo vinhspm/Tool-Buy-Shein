@@ -40,6 +40,7 @@ const DEFAULT_CONFIG = {
   folderId: '',
   profiles: [],
   concurrency: 3,
+  headless: false,
 };
 
 function loadConfig() {
@@ -97,7 +98,7 @@ app.post('/api/start', (req, res) => {
   // profileAssignments: [{ rowIndex, profileId, label }]
 
   if (!products?.length) return res.status(400).json({ error: 'No products provided' });
-  if (!config.email || !config.password) return res.status(400).json({ error: 'Credentials not configured' });
+  if (!config.automationToken) return res.status(400).json({ error: 'Automation Token not configured' });
 
   // Build tasks
   currentTasks = products.map((product, i) => {
@@ -122,7 +123,7 @@ app.post('/api/start', (req, res) => {
   runBatch({
     tasks: currentTasks,
     concurrency: config.concurrency,
-    credentials: { email: config.email, password: config.password },
+    credentials: { email: config.email, password: config.password, headless: config.headless },
     onTaskUpdate: (taskId, status, message) => {
       io.emit('task:update', { taskId, status, message, time: new Date().toISOString() });
     },

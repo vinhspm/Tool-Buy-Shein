@@ -19,6 +19,7 @@ function parseExcel(filePath) {
     size:        String(row['size'] || row['Size'] || '').trim(),
     quantity:    parseInt(row['quantity'] || row['Quantity'] || 1, 10),
     shipping_address: String(row['shipping_address'] || row['Shipping Address'] || '').trim(),
+    sku_code:    String(row['sku_code'] || row['SKU Code'] || '').trim(),
   })).filter(row => row.product_url); // skip empty rows
 }
 

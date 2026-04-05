@@ -116,7 +116,7 @@
     <section id="tab-content-upload" class="tab-content hidden space-y-6">
       <div class="bg-surface-1 border border-white/10 rounded-2xl p-8">
         <h2 class="text-lg font-semibold text-white mb-2">Upload Product List</h2>
-        <p class="text-sm text-slate-500 mb-6">Excel file với các cột: <code class="bg-surface-2 px-2 py-0.5 rounded text-slate-300">product_url, color, size, quantity, shipping_address</code></p>
+        <p class="text-sm text-slate-500 mb-6">Excel file với các cột: <code class="bg-surface-2 px-2 py-0.5 rounded text-slate-300">product_url, sku_code, color, size, quantity, shipping_address</code></p>
 
         <div id="drop-zone" class="border-2 border-dashed border-white/20 hover:border-brand-500/50 rounded-2xl p-12 text-center cursor-pointer transition-all group" onclick="document.getElementById('file-input').click()">
           <div class="w-14 h-14 bg-surface-2 group-hover:bg-brand-500/10 rounded-2xl flex items-center justify-center mx-auto mb-4 transition-all">
@@ -138,6 +138,7 @@
                 <tr class="border-b border-white/10 bg-surface-2">
                   <th class="px-4 py-3 text-left text-xs text-slate-500 font-medium">#</th>
                   <th class="px-4 py-3 text-left text-xs text-slate-500 font-medium">Product URL</th>
+                  <th class="px-4 py-3 text-left text-xs text-slate-500 font-medium">SKU</th>
                   <th class="px-4 py-3 text-left text-xs text-slate-500 font-medium">Color</th>
                   <th class="px-4 py-3 text-left text-xs text-slate-500 font-medium">Size</th>
                   <th class="px-4 py-3 text-left text-xs text-slate-500 font-medium">Qty</th>
@@ -221,6 +222,15 @@
               Concurrency
             </label>
             <input id="cfg-concurrency" type="number" min="1" max="10" value="3" class="input-field w-full" />
+          </div>
+          <div>
+            <label class="block text-sm text-slate-400 mb-2" for="cfg-headless">
+              Headless Mode
+            </label>
+            <label class="flex items-center gap-2 cursor-pointer mt-2">
+              <input type="checkbox" id="cfg-headless" class="w-4 h-4 rounded border-white/10 bg-surface-2 text-brand-500" />
+              <span class="text-sm text-slate-300">Run browser in background</span>
+            </label>
           </div>
         </div>
 

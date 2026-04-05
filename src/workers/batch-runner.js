@@ -1,5 +1,6 @@
 const { startProfile, stopProfile, stopAllProfiles } = require('../services/multilogin');
 const { runPurchase } = require('../services/shein-automation');
+const { cleanupOldScreenshots } = require('../utils/screenshot-manager');
 
 let abortFlag = false;
 
@@ -15,62 +16,98 @@ async function abortBatch() {
  */
 async function runBatch({ tasks, concurrency = 3, credentials, onTaskUpdate }) {
   abortFlag = false;
-  const queue = [...tasks];
-  const running = new Set();
+  
+  // Clean old screenshots before starting heavy loop
+  cleanupOldScreenshots(7);
 
-  async function runTask(task) {
-    const { product, profile, taskId } = task;
+  const profileGroups = new Map();
+  for (const task of tasks) {
+    const pId = task.profile.profileId;
+    if (!profileGroups.has(pId)) {
+      profileGroups.set(pId, { profile: task.profile, tasks: [] });
+    }
+    profileGroups.get(pId).tasks.push(task);
+  }
 
-    const log = (msg) => {
-      console.log(`[${profile.label}] ${msg}`);
-      onTaskUpdate(taskId, 'running', msg);
-    };
+  const queue = Array.from(profileGroups.values());
+  const runningGroups = new Set();
 
-    const fail = (msg) => {
-      console.error(`[${profile.label}] ${msg}`);
-      onTaskUpdate(taskId, 'error', msg);
-    };
-
+  async function runGroup(group) {
+    const { profile, tasks: groupTasks } = group;
     let browserURL = null;
 
-    try {
-      onTaskUpdate(taskId, 'running', `🚀 Starting profile ${profile.label}...`);
+    const logGroup = (msg) => {
+      console.log(`[${profile.label}] ${msg}`);
+      // Notify the first pending task or all pending tasks so UI knows the profile is spinning up
+      for (const t of groupTasks) {
+        if (!t.started) {
+          onTaskUpdate(t.taskId, 'running', msg);
+        }
+      }
+    };
 
+    const failAll = (msg) => {
+      console.error(`[${profile.label}] ${msg}`);
+      for (const t of groupTasks) {
+        onTaskUpdate(t.taskId, 'error', msg);
+      }
+    };
+
+    try {
       if (!profile.folderId) {
-        fail('❌ Folder ID is not configured. Go to Settings and enter your Folder ID.');
+        failAll('❌ Folder ID is not configured. Go to Settings and enter your Folder ID.');
         return;
       }
       if (!profile.profileId) {
-        fail('❌ Profile ID is missing. Go to Profiles tab and add your profile IDs.');
+        failAll('❌ Profile ID is missing. Go to Profiles tab and add your profile IDs.');
         return;
       }
 
+      logGroup(`🚀 Starting profile ${profile.label} for ${groupTasks.length} tasks...`);
       browserURL = await startProfile(
         profile.folderId,
         profile.profileId,
         credentials.email,
-        credentials.password
+        credentials.password,
+        credentials.headless
       );
-      log(`🔗 Browser connected at ${browserURL}`);
+      
+      console.log(`[${profile.label}] 🔗 Browser connected at ${browserURL}`);
 
-      const result = await runPurchase({
-        browserURL,
-        product,
-        folderId: profile.folderId,
-        profileId: profile.profileId,
-        log,
-      });
+      // Run each product sequentially in the same opened profile
+      for (const t of groupTasks) {
+        if (abortFlag) break;
+        t.started = true;
+        
+        const logTask = (msg) => {
+          console.log(`[${profile.label} | ${t.product.sku_code}] ${msg}`);
+          onTaskUpdate(t.taskId, 'running', msg);
+        };
 
-      if (result.success) {
-        onTaskUpdate(taskId, 'success', '✅ Purchase completed successfully');
-      } else {
-        fail(`❌ Purchase failed: ${result.error}`);
+        try {
+          const result = await runPurchase({
+            browserURL,
+            product: t.product,
+            folderId: profile.folderId,
+            profileId: profile.profileId,
+            profileLabel: profile.label,
+            log: logTask,
+          });
+
+          if (result.success) {
+            onTaskUpdate(t.taskId, 'success', '✅ Purchase completed successfully');
+          } else {
+            onTaskUpdate(t.taskId, 'error', `❌ Purchase failed: ${result.error}`);
+          }
+        } catch (err) {
+          onTaskUpdate(t.taskId, 'error', `❌ Fatal error: ${err.message}`);
+        }
       }
 
     } catch (err) {
-      fail(`❌ Fatal error: ${err.message}`);
+      failAll(`❌ Profile Error: ${err.message}`);
     } finally {
-      running.delete(taskId);
+      runningGroups.delete(profile.profileId);
       if (browserURL) {
         try {
           await stopProfile(profile.folderId, profile.profileId, credentials.email, credentials.password);
@@ -83,18 +120,18 @@ async function runBatch({ tasks, concurrency = 3, credentials, onTaskUpdate }) {
   return new Promise((resolve) => {
     function tryStartNext() {
       if (abortFlag) {
-        queue.length = 0; // instantly clear pending jobs
+        queue.length = 0; // instantly clear pending groups
       }
 
-      while (running.size < concurrency && queue.length > 0) {
-        const task = queue.shift();
-        running.add(task.taskId);
-        runTask(task).then(() => {
+      while (runningGroups.size < concurrency && queue.length > 0) {
+        const group = queue.shift();
+        runningGroups.add(group.profile.profileId);
+        runGroup(group).then(() => {
           tryStartNext();
-          if (running.size === 0 && queue.length === 0) resolve();
+          if (runningGroups.size === 0 && queue.length === 0) resolve();
         });
       }
-      if (running.size === 0 && queue.length === 0) {
+      if (runningGroups.size === 0 && queue.length === 0) {
         resolve();
       }
     }

@@ -83,6 +83,7 @@ function renderPreview(products) {
     <tr>
       <td class="text-slate-600">${i + 1}</td>
       <td class="max-w-xs truncate"><a href="${p.product_url}" target="_blank" class="text-brand-400 hover:underline text-xs">${shortUrl(p.product_url)}</a></td>
+      <td class="font-mono text-xs text-slate-400">${p.sku_code || '—'}</td>
       <td><span class="px-2 py-0.5 bg-surface-1 rounded-full text-xs">${p.color || '—'}</span></td>
       <td><span class="px-2 py-0.5 bg-surface-1 rounded-full text-xs">${p.size || '—'}</span></td>
       <td class="text-slate-400">${p.quantity}</td>
@@ -162,6 +163,7 @@ async function saveSettings() {
     automationToken: document.getElementById('cfg-token').value.trim(),
     folderId: document.getElementById('cfg-folder').value.trim(),
     concurrency: parseInt(document.getElementById('cfg-concurrency').value) || 3,
+    headless: document.getElementById('cfg-headless').checked,
     profiles,
   };
 
@@ -446,6 +448,7 @@ async function loadSettings() {
     if (cfg.automationToken) document.getElementById('cfg-token').value = cfg.automationToken;
     if (cfg.folderId) document.getElementById('cfg-folder').value = cfg.folderId;
     if (cfg.concurrency) document.getElementById('cfg-concurrency').value = cfg.concurrency;
+    if (cfg.headless !== undefined) document.getElementById('cfg-headless').checked = cfg.headless;
     if (cfg.profiles?.length) {
       cfg.profiles.forEach(p => addProfileRow(p.profileId, p.label));
       profiles = cfg.profiles;

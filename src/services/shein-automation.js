@@ -3,26 +3,7 @@ const { parseShippingAddress } = require('../utils/address-parser');
 const path = require('path');
 const fs = require('fs');
 
-// Debug Screenshot Helper
-async function takeDebugScreenshot(page, stepName, log, productTitle = 'unknown') {
-  try {
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const safeTitle = productTitle.replace(/[^a-z0-9]/gi, '_').substring(0, 30) || 'no_title';
-    const folderPath = path.join(process.cwd(), 'screenshots');
-    
-    if (!fs.existsSync(folderPath)) {
-      fs.mkdirSync(folderPath, { recursive: true });
-    }
-    
-    const fileName = `${timestamp}_${safeTitle}_${stepName}.png`;
-    const filePath = path.join(folderPath, fileName);
-    
-    await page.screenshot({ path: filePath, fullPage: true });
-    log(`📸 Screenshot saved: ${fileName}`);
-  } catch (err) {
-    log(`⚠️ Could not take screenshot: ${err.message}`);
-  }
-}
+const { takeStructuredScreenshot } = require('../utils/screenshot-manager');
 
 const CAPTCHA_RETRY_LIMIT = 3;
 
@@ -46,14 +27,21 @@ async function dismissPromotionDialog(page, log) {
       const text = document.body.innerText;
       return text.includes('Promotion Savings') || 
              text.includes('Are you sure you want to leave') || 
+             text.includes('Leave Now') || 
+             text.includes('Promotion Savings') || 
+             text.includes('Got it') || 
              text.includes('CONTINUE CHECKING OUT');
     }).catch(() => false);
 
     if (hasPromo) {
        log(`🛑 Promotion popup detected. Sending ESC to dismiss...`);
-       await page.keyboard.press('Escape');
+       const buttonClose = page.locator('button.sui-dialog__closebtn');
+       await buttonClose.waitFor({ state: 'visible', timeout: 5000 });
+       await buttonClose.click();
+      //  await page.keyboard.press('Escape');
        await new Promise(r => setTimeout(r, 600)); 
     }
+
   } catch(e) {}
 }
 
@@ -235,6 +223,56 @@ async function cleanupCartItems(page, targetTitle, log) {
   }
 }
 
+// Empties the entire cart by going to homepage and clicking cart icon
+async function emptyEntireCart(page, log) {
+  log(`🛒 Going to homepage to check cart...`);
+  await navigateWithRetry(page, 'https://us.shein.com/', log);
+  await humanDelay(2000, 4000);
+  await dismissPromotionDialog(page, log);
+
+  log(`🛒 Clicking Cart Icon...`);
+  const cartIcon = page.locator('.header-right-dropdown-cart, .bsc-mini-cart__trigger, [class*="mini-cart"], a[href*="cart"]').first();
+  await cartIcon.waitFor({ state: 'visible', timeout: 10000 }).catch(()=>{});
+  
+  // Also try direct URL if icon isn't clickable
+  await cartIcon.click().catch(()=> navigateWithRetry(page, 'https://us.shein.com/cart', log));
+  
+  await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+  await humanDelay(2000, 3000);
+
+  if (await hasCaptcha(page)) {
+    throw new Error('CAPTCHA_BLOCK: Captcha appeared on Cart page');
+  }
+
+  let hasItems = true;
+  let attempts = 0;
+  while(hasItems && attempts < 10) {
+    attempts++;
+    await dismissPromotionDialog(page, log);
+    const trashBtns = await page.$$('div.bsc-cart-item-main__delete');
+    
+    if (trashBtns.length === 0) {
+      log(`✅ Cart is completely empty.`);
+      break;
+    }
+    
+    log(`🗑️ Found ${trashBtns.length} item(s). Deleting one...`);
+    try {
+      await trashBtns[0].click();
+      await humanDelay(800, 1500);
+      
+      const confirmBtn = await page.$('button:has-text("Yes")');
+      if (confirmBtn) {
+        await confirmBtn.click();
+        await humanDelay(2000, 3000);
+      }
+    } catch (e) {
+      log(`⚠️ Failed to click delete, retrying...`);
+    }
+    await humanDelay(1500, 2500);
+  }
+}
+
 // Set quantity for target item inside cart
 async function setCartItemQuantity(page, qty, log) {
   if (!qty || qty <= 0) return;
@@ -270,9 +308,75 @@ async function setCartItemQuantity(page, qty, log) {
   }
 }
 
+async function verifyOrderDetails(page, product, log, profileLabel, productTitle) {
+  log(`⏳ Waiting for Shein to process payment and show order details...`);
+  try {
+    const orderTable = page.locator('table.new-order-table').first();
+    await orderTable.waitFor({ state: 'visible', timeout: 45000 });
+    
+    await humanDelay(1000, 2000);
+    const orderText = (await orderTable.textContent() || '').toLowerCase();
+    
+    const missingFields = [];
+    const { sku_code, color, size, quantity } = product;
+
+    if (sku_code && !orderText.includes(String(sku_code).toLowerCase())) missingFields.push(`SKU: ${sku_code}`);
+    if (color && !orderText.includes(String(color).toLowerCase())) missingFields.push(`Color: ${color}`);
+    if (size && !orderText.includes(String(size).toLowerCase())) missingFields.push(`Size: ${size}`);
+    if (quantity && !orderText.includes(String(quantity).toLowerCase())) missingFields.push(`Quantity: ${quantity}`);
+    
+    if (missingFields.length > 0) {
+      throw new Error(`Mismatch in Order Table - Missing: ${missingFields.join(', ')}`);
+    }
+    
+    await takeStructuredScreenshot(page, 'order_verified_success', profileLabel, productTitle);
+    log(`✅ Order verified successfully (SKU, Size, Color, Qty matched)`);
+  } catch (err) {
+    log(`⚠️ Order verification failed: ${err.message}`);
+    await takeStructuredScreenshot(page, 'order_verified_failed', profileLabel, productTitle);
+    throw new Error(`Order verification failed: ${err.message}`);
+  }
+}
+
+async function navigateToProductBySku(page, sku_code, log) {
+  const searchUrl = `https://us.shein.com/pdsearch/${sku_code}/`;
+  log(`🔍 Searching product by SKU: ${sku_code} (${searchUrl})`);
+  await navigateWithRetry(page, searchUrl, log);
+  await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
+  await humanDelay(1500, 3000);
+  
+  const noResults = await page.evaluate(() => {
+    return document.body.innerText.includes("We couldn't find any results");
+  }).catch(() => false);
+
+  if (noResults) {
+    throw new Error(`Product matching SKU [${sku_code}] not found (Empty Search).`);
+  }
+
+  log(`🎯 Target product card found. Extracting details link...`);
+  const firstProductDiv = page.locator('div.j-expose__product-item').first();
+  await firstProductDiv.waitFor({ state: 'visible', timeout: 15000 });
+  
+  const productLink = firstProductDiv.locator('a').first();
+  const targetHref = await productLink.getAttribute('href');
+  if (!targetHref) throw new Error("Could not extract product link from search results.");
+  
+  const productDetailUrl = targetHref.startsWith('http') ? targetHref : 'https://us.shein.com' + targetHref;
+  log(`🛍️ Opening product details page: ${productDetailUrl}`);
+  
+  await navigateWithRetry(page, productDetailUrl, log);
+  await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+}
+
 // Main automation: run one product purchase for one profile
-async function runPurchase({ browserURL, product, folderId, profileId, log }) {
-  const { product_url, color, size, quantity, shipping_address } = product;
+async function runPurchase({ browserURL, product, folderId, profileId, profileLabel, log }) {
+  const { product_url, color, size, quantity, shipping_address, sku_code } = product;
+  
+  if (!sku_code) {
+    log(`❌ Error: SKU code is missing for this input. Please update the Excel file.`);
+    return { success: false, error: 'SKU code is missing.' };
+  }
+
   const addr = parseShippingAddress(shipping_address);
 
   log(`🌐 Connecting to Multilogin profile browser...`);
@@ -281,10 +385,11 @@ async function runPurchase({ browserURL, product, folderId, profileId, log }) {
   const page = await context.newPage();
 
   try {
-    // Step 1: Navigate to product
-    log(`🛍️ Opening product: ${product_url}`);
-    await navigateWithRetry(page, product_url, log);
-    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+    // Step 0: Clear Entire Cart to prevent leftovers from failed loops
+    await emptyEntireCart(page, log);
+
+    // Step 1: Navigate to product via SKU Search
+    await navigateToProductBySku(page, sku_code, log);
 
     // Step 2: Extract Target Product Title
     const productTitle = await getProductTitle(page, log);
@@ -294,6 +399,7 @@ async function runPurchase({ browserURL, product, folderId, profileId, log }) {
     await humanDelay(600, 1200);
     if (size) await selectSize(page, size, log);
     await humanDelay(600, 1200);
+    await takeStructuredScreenshot(page, 'variant_selected', profileLabel, productTitle);
 
     // Step 4: Add to Cart (Directly)
     log(`🛒 Clicking Add to Cart...`);
@@ -302,6 +408,7 @@ async function runPurchase({ browserURL, product, folderId, profileId, log }) {
     await addToCartBtn.waitFor({ timeout: 10000 });
     await addToCartBtn.click();
     await humanDelay(1500, 3000);
+    await takeStructuredScreenshot(page, 'cart_added', profileLabel, productTitle);
 
     log(`✅ Added to cart, navigating to Cart page...`);
 
@@ -320,6 +427,7 @@ async function runPurchase({ browserURL, product, folderId, profileId, log }) {
     // Step 6: Cleanup Cart & Set Quantity
     await cleanupCartItems(page, productTitle, log);
     await setCartItemQuantity(page, quantity, log);
+    await takeStructuredScreenshot(page, 'cart_verified', profileLabel, productTitle);
 
     // Step 7: Proceed to Checkout from Cart
     log(`📲 Clicking Checkout in Cart...`);
@@ -336,8 +444,7 @@ async function runPurchase({ browserURL, product, folderId, profileId, log }) {
 
     // Step 8: Handle shipping address
     log(`📦 Managing shipping address for: ${addr.firstName} ${addr.lastName}`);
-    // NOTE: Placeholder - will navigate and fill address
-    await handleShippingAddress(page, addr, log, productTitle);
+    await handleShippingAddress(page, addr, log, productTitle, profileLabel);
 
     // Step 9: Final Place Order (on Checkout Page)
     log(`🎯 Placing order...`);
@@ -345,22 +452,20 @@ async function runPurchase({ browserURL, product, folderId, profileId, log }) {
     const placeOrderBtn = page.locator('button:has-text("Place Order"), button:has-text("Continue"), [class*="place-order"]').first();
     await placeOrderBtn.waitFor({ timeout: 15000 });
     await placeOrderBtn.click();
-    await humanDelay(3000, 5000);
-    await takeDebugScreenshot(page, 'final_place_order', log, productTitle);
-
-    log(`✅ Order placed successfully!`);
+    
+    await verifyOrderDetails(page, product, log, profileLabel, productTitle);
     return { success: true };
 
   } catch (err) {
     log(`❌ Error: ${err.message}`);
     return { success: false, error: err.message };
   } finally {
-    // await page.close().catch(() => {});
+    await page.close().catch(() => {});
   }
 }
 
 // Shipping address handler
-async function handleShippingAddress(page, addr, log, productTitle) {
+async function handleShippingAddress(page, addr, log, productTitle, profileLabel) {
   log(`📝 [Address] Editing address for: ${addr.firstName} ${addr.lastName}`);
   try {
     // 1. Locate and click Edit Address button with Retry Mechanism
@@ -396,7 +501,7 @@ async function handleShippingAddress(page, addr, log, productTitle) {
     }
     
     if (!dialogAppeared) {
-      await takeDebugScreenshot(page, 'edit_modal_failed', log, productTitle);
+      await takeStructuredScreenshot(page, 'edit_modal_failed', profileLabel, productTitle);
       throw new Error(`Address dialog (${dialogSelector}) did not appear after 5 retries.`);
     }
 
@@ -419,7 +524,7 @@ async function handleShippingAddress(page, addr, log, productTitle) {
       }
       return null;
     }, { timeout: 15000 }).catch(async () => {
-      await takeDebugScreenshot(page, 'firstname_js_not_found', log, productTitle);
+      await takeStructuredScreenshot(page, 'firstname_js_not_found', profileLabel, productTitle);
       throw new Error("First Name input not found via JS querySelector. Check console for HTML dump.");
     });
     
@@ -454,7 +559,7 @@ async function handleShippingAddress(page, addr, log, productTitle) {
     // 4. Dropdown Selection: wait for the visible ul that contains list items, select first item
     const firstResult = page.locator('ul.search-result__container#associate-listbox:visible > li').first();
     await firstResult.waitFor({ state: 'visible', timeout: 10000 }).catch(async () => {
-      await takeDebugScreenshot(page, 'address_dropdown_timeout', log, productTitle);
+      await takeStructuredScreenshot(page, 'address_dropdown_timeout', profileLabel, productTitle);
       throw new Error("Address suggestions dropdown did not appear.");
     });
     const hasOptions = await firstResult.isVisible().catch(() => false);
@@ -484,10 +589,11 @@ async function handleShippingAddress(page, addr, log, productTitle) {
     await saveBtn.click();
     await humanDelay(2000, 4000);
     
+    await takeStructuredScreenshot(page, 'address_filled', profileLabel, productTitle);
     log(`✅ Specific address details configured and saved.`);
   } catch (err) {
     log(`⚠️ Error in handleShippingAddress: ${err.message}`);
-    await takeDebugScreenshot(page, 'address_error_fallback', log, productTitle);
+    await takeStructuredScreenshot(page, 'address_error_fallback', profileLabel, productTitle);
     // Not throwing here in case address edit wasn't strictly mandatory or it already existed.
   }
 }

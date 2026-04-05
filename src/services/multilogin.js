@@ -27,10 +27,10 @@ async function getToken() {
   throw new Error('Automation Token not found. Please click "2. Gen Token" in Settings first.');
 }
 
-async function startProfile(folderId, profileId, email, password) {
+async function startProfile(folderId, profileId, email, password, headless = false) {
   const token = await getToken(email, password);
-  const startUrl = `${LAUNCHER}/api/v2/profile/f/${folderId}/p/${profileId}/start?automation_type=playwright&headless_mode=false`;
-  console.log(`[MLX] Starting profile: ...${profileId.slice(-8)}`);
+  const startUrl = `${LAUNCHER}/api/v2/profile/f/${folderId}/p/${profileId}/start?automation_type=playwright&headless_mode=${headless}`;
+  console.log(`[MLX] Starting profile: ...${profileId.slice(-8)} (headless: ${headless})`);
 
   try {
     const response = await axios.get(startUrl, {
