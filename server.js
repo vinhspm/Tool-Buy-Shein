@@ -39,7 +39,7 @@ const DEFAULT_CONFIG = {
   automationToken: '',
   folderId: '',
   profiles: [],
-  concurrency: 3,
+  concurrency: 1, // Chạy tuần tự mặc định
   headless: false,
 };
 

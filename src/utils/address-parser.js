@@ -7,7 +7,7 @@
 
 function parseShippingAddress(raw) {
   if (!raw) return {};
-  const lines = String(raw).split('\n').map(l => l.trim());
+  const lines = String(raw).split('\n').filter(l => l.trim() !== '').map(l => l.trim());
   
   // 1. Process Name (firstName, lastName)
   const fullName = lines[0] || '';
@@ -26,7 +26,7 @@ function parseShippingAddress(raw) {
   // 3. Process Phone
   let phone = lines[2] || '';
   // Xóa mã quốc gia ở đầu như (+1), (+84) nếu có
-  phone = phone.replace(/^\(\+\d+\)/, '').trim();  
+  phone = phone.replace(/^\(\+\d+\)/, '').trim(); 
   // 4. Process Zip (Extract digits from "Postal Code 61548")
   const zipRaw = lines[3] || '';
   const zipMatch = zipRaw.match(/\d+/);

@@ -1,10 +1,10 @@
 // Multilogin X API integration
 // NOTE: Plan does not support /start via API → use detectRunningBrowser() instead
 const axios = require('axios');
-const md5   = require('md5');
+const md5 = require('md5');
 const https = require('https');
 
-const MLX_API  = 'https://api.multilogin.com';
+const MLX_API = 'https://api.multilogin.com';
 const LAUNCHER = 'https://launcher.mlx.yt:45001';
 const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 
@@ -17,7 +17,7 @@ async function getToken() {
   if (fs.existsSync(CONFIG_FILE)) {
     try {
       config = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
-    } catch(e) {}
+    } catch (e) { }
   }
 
   if (config.automationToken) {
@@ -49,7 +49,7 @@ async function startProfile(folderId, profileId, email, password, headless = fal
 
   } catch (err) {
     const status = err.response?.status;
-    const raw    = err.response?.data;
+    const raw = err.response?.data;
     console.warn(`[MLX] Start error (HTTP ${status}):`, JSON.stringify(raw, null, 2));
 
     // 403 / already running → stop then restart
@@ -82,11 +82,13 @@ async function forceStop(folderId, profileId, token) {
   try {
     await axios.get(
       `${LAUNCHER}/api/v1/profile/stop/p/${profileId}`,
-      { headers: {
+      {
+        headers: {
           'Content-Type': 'application/json',
           'Accept': 'application/json',
           'Authorization': `Bearer ${token}`,
-        }, httpsAgent }
+        }, httpsAgent
+      }
     );
     console.log(`[MLX] Profile stopped successfully by forceStop`);
   } catch (e) {
@@ -120,15 +122,44 @@ async function stopAllProfiles(tokenOrEmail, password) {
     } else if (!token) {
       token = await getToken();
     }
-    
+
     await axios.get(
       `${LAUNCHER}/api/v1/profile/stop_all?type=all`,
       { headers: { Authorization: `Bearer ${token}` }, httpsAgent }
     );
+
     console.log(`[MLX] 🛑 ALL Profiles stopped successfully via stop_all API`);
   } catch (err) {
     console.warn(`[MLX] Stop All Warning:`, err.message);
   }
 }
 
-module.exports = { startProfile, stopProfile, forceStop, stopAllProfiles, getToken };
+async function unlockProfiles() {
+  let config = {};
+  if (fs.existsSync(CONFIG_FILE)) {
+    try {
+      config = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
+    } catch (e) { }
+  }
+  const ids = config.profiles.map(p => p.profileId);
+  const token = config.automationToken;
+  let configAxios = {
+    method: 'get',
+    maxBodyLength: Infinity,
+    url: `${MLX_API}/bpds/profile/unlock_profiles?ids=${JSON.stringify(ids)}`,
+    headers: {
+      'Accept': 'application/json',
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`
+    }
+  };
+
+  axios.request(configAxios)
+    .then((response) => {
+      console.log(`[MLX] Profiles ${ids} unlocked successfully`, JSON.stringify(response.data));
+    })
+    .catch((error) => {
+      console.log(`[MLX] Profiles ${ids} unlock failed`, error);
+    });
+}
+module.exports = { startProfile, stopProfile, forceStop, stopAllProfiles, getToken, unlockProfiles };

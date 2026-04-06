@@ -4,6 +4,7 @@ const path = require('path');
 const fs = require('fs');
 
 const { takeStructuredScreenshot } = require('../utils/screenshot-manager');
+const { detectCaptcha, solveGeetestV4 } = require('../utils/captcha-solver');
 
 const CAPTCHA_RETRY_LIMIT = 3;
 
@@ -30,6 +31,8 @@ async function dismissPromotionDialog(page, log) {
              text.includes('Leave Now') || 
              text.includes('Promotion Savings') || 
              text.includes('Got it') || 
+             text.includes('I am human') || 
+             text.includes('Please click to complete the following actions') || 
              text.includes('CONTINUE CHECKING OUT');
     }).catch(() => false);
 
@@ -45,42 +48,15 @@ async function dismissPromotionDialog(page, log) {
   } catch(e) {}
 }
 
-// Detect if CAPTCHA is present on page
-async function hasCaptcha(page) {
-  try {
-    const captchaSelectors = [
-      'iframe[src*="captcha"]',
-      '[class*="captcha"]',
-      '[id*="captcha"]',
-      '.bots-tip',
-      '.captcha-container',
-      '.geetest_panel_box'
-    ];
-    for (const sel of captchaSelectors) {
-      const el = await page.$(sel);
-      if (el) return true;
-    }
-    return false;
-  } catch {
-    return false;
-  }
-}
-
-// Navigate with captcha retry logic
+// Navigate and solve captcha immediately if found (Fail-fast instead of loop)
 async function navigateWithRetry(page, url, log) {
-  for (let attempt = 1; attempt <= CAPTCHA_RETRY_LIMIT; attempt++) {
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await humanDelay(1500, 3000);
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  await humanDelay(1500, 3000);
 
-    if (await hasCaptcha(page)) {
-      log(`⚠️ Captcha detected (attempt ${attempt}/${CAPTCHA_RETRY_LIMIT}), refreshing...`);
-      if (attempt === CAPTCHA_RETRY_LIMIT) {
-        throw new Error('CAPTCHA_BLOCK: Could not bypass captcha after retries');
-      }
-      await humanDelay(2000, 4000);
-      continue;
-    }
-    return; // success
+  if (await detectCaptcha(page)) {
+    log(`🚨 Phát hiện hệ thống kiểm tra Bots / Captcha chặn trang! Bắt đầu vượt rào...`);
+    // await solveGeetestV4(page, log);
+    throw new Error('CAPTCHA_BLOCKED');
   }
 }
 
@@ -126,11 +102,9 @@ async function selectSize(page, sizeName, log) {
     const sizeOptions = await page.$$('.product-intro__size-choose .size-radio [data-attr_value_name], .product-intro__size-radio');
     for (const opt of sizeOptions) {
       const attrName = (await opt.getAttribute('data-attr_value_name') || '').toLowerCase();
-      const ariaLabel = (await opt.getAttribute('aria-label') || '').toLowerCase();
       const text = ((await opt.textContent()) || '').trim().toLowerCase();
-      const title = (await opt.getAttribute('title') || '').toLowerCase();
 
-      if (attrName === normalized || (ariaLabel && ariaLabel.includes(normalized)) || text === normalized || (title && title.includes(normalized))) {
+      if (attrName === normalized || text === normalized) {
         const isDisabled = await opt.getAttribute('aria-disabled') === 'true';
         const className = await opt.getAttribute('class') || '';
 
@@ -240,8 +214,10 @@ async function emptyEntireCart(page, log) {
   await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
   await humanDelay(2000, 3000);
 
-  if (await hasCaptcha(page)) {
-    throw new Error('CAPTCHA_BLOCK: Captcha appeared on Cart page');
+  if (await detectCaptcha(page)) {
+    log(`🚨 Phát hiện hệ thống kiểm tra Bots / Captcha chặn trang! Bắt đầu vượt rào...`);
+    // await solveGeetestV4(page, log);
+    throw new Error('CAPTCHA_BLOCKED');
   }
 
   let hasItems = true;
@@ -312,7 +288,27 @@ async function verifyOrderDetails(page, product, log, profileLabel, productTitle
   log(`⏳ Waiting for Shein to process payment and show order details...`);
   try {
     const orderTable = page.locator('table.new-order-table').first();
-    await orderTable.waitFor({ state: 'visible', timeout: 45000 });
+    const paymentSuccess = page.locator('text="Payment Successful"').first();
+
+    // Sử dụng locator.or() để chờ 1 trong 2 màn hình một cách an toàn
+    try {
+      await orderTable.or(paymentSuccess).waitFor({ state: 'visible', timeout: 45000 });
+    } catch (e) {
+      // Có thể timeout nếu trang load chậm, kệ để chờ bảng Order Table sẽ bắt lỗi bên dưới
+    }
+
+    if (await paymentSuccess.isVisible()) {
+       log(`✅ Detected "Payment Successful" screen!`);
+       await takeStructuredScreenshot(page, 'payment_successful', profileLabel, productTitle);
+       
+       const viewOrderBtn = page.locator('button.pay-result-content__jump').first();
+       await viewOrderBtn.waitFor({ state: 'visible', timeout: 10000 });
+       await viewOrderBtn.click().catch(() => {});
+       log(`🔄 Clicked "View My Order", waiting for order details table...`);
+       await humanDelay(2000, 3000);
+    }
+
+    await orderTable.waitFor({ state: 'visible', timeout: 30000 });
     
     await humanDelay(1000, 2000);
     const orderText = (await orderTable.textContent() || '').toLowerCase();
@@ -339,6 +335,7 @@ async function verifyOrderDetails(page, product, log, profileLabel, productTitle
 }
 
 async function navigateToProductBySku(page, sku_code, log) {
+  await dismissPromotionDialog(page, log);
   const searchUrl = `https://us.shein.com/pdsearch/${sku_code}/`;
   log(`🔍 Searching product by SKU: ${sku_code} (${searchUrl})`);
   await navigateWithRetry(page, searchUrl, log);
@@ -355,6 +352,7 @@ async function navigateToProductBySku(page, sku_code, log) {
 
   log(`🎯 Target product card found. Extracting details link...`);
   const firstProductDiv = page.locator('div.j-expose__product-item').first();
+  await dismissPromotionDialog(page, log);
   await firstProductDiv.waitFor({ state: 'visible', timeout: 15000 });
   
   const productLink = firstProductDiv.locator('a').first();
@@ -363,7 +361,7 @@ async function navigateToProductBySku(page, sku_code, log) {
   
   const productDetailUrl = targetHref.startsWith('http') ? targetHref : 'https://us.shein.com' + targetHref;
   log(`🛍️ Opening product details page: ${productDetailUrl}`);
-  
+  await dismissPromotionDialog(page, log);
   await navigateWithRetry(page, productDetailUrl, log);
   await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
 }
@@ -407,7 +405,7 @@ async function runPurchase({ browserURL, product, folderId, profileId, profileLa
     const addToCartBtn = page.locator('button:has-text("Add to Bag"), button:has-text("Add to Cart"), .add-to-cart, [class*="add-btn"]').first();
     await addToCartBtn.waitFor({ timeout: 10000 });
     await addToCartBtn.click();
-    await humanDelay(1500, 3000);
+    await humanDelay(3000, 5000);
     await takeStructuredScreenshot(page, 'cart_added', profileLabel, productTitle);
 
     log(`✅ Added to cart, navigating to Cart page...`);
@@ -415,13 +413,15 @@ async function runPurchase({ browserURL, product, folderId, profileId, profileLa
     // Step 5: Go to Cart via header icon
     await dismissPromotionDialog(page, log);
     const cartIcon = page.locator('.bsc-mini-cart__trigger, [class*="mini-cart"], a[href*="cart"]').first();
-    await cartIcon.waitFor({ timeout: 10000 });
+    await cartIcon.waitFor({ state: 'visible', timeout: 10000 });
     await cartIcon.click();
     await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
     await humanDelay(2000, 4000);
 
-    if (await hasCaptcha(page)) {
-      throw new Error('CAPTCHA_BLOCK: Captcha appeared on navigating to Cart');
+    if (await detectCaptcha(page)) {
+      log(`🚨 Phát hiện hệ thống kiểm tra Bots / Captcha chặn trang! Bắt đầu vượt rào...`);
+      // await solveGeetestV4(page, log);
+      throw new Error('CAPTCHA_BLOCKED');
     }
 
     // Step 6: Cleanup Cart & Set Quantity
@@ -438,8 +438,10 @@ async function runPurchase({ browserURL, product, folderId, profileId, profileLa
     await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
     await humanDelay(3000, 5000);
 
-    if (await hasCaptcha(page)) {
-      throw new Error('CAPTCHA_BLOCK: Captcha on checkout page');
+    if (await detectCaptcha(page)) {
+      log(`🚨 Phát hiện hệ thống kiểm tra Bots / Captcha chặn trang! Bắt đầu vượt rào...`);
+      // await solveGeetestV4(page, log);
+      throw new Error('CAPTCHA_BLOCKED');
     }
 
     // Step 8: Handle shipping address
@@ -451,14 +453,17 @@ async function runPurchase({ browserURL, product, folderId, profileId, profileLa
     await dismissPromotionDialog(page, log);
     const placeOrderBtn = page.locator('button:has-text("Place Order"), button:has-text("Continue"), [class*="place-order"]').first();
     await placeOrderBtn.waitFor({ timeout: 15000 });
+    await dismissPromotionDialog(page, log);
     await placeOrderBtn.click();
     
+    await dismissPromotionDialog(page, log);
     await verifyOrderDetails(page, product, log, profileLabel, productTitle);
     return { success: true };
 
   } catch (err) {
-    log(`❌ Error: ${err.message}`);
-    return { success: false, error: err.message };
+    const errorMsg = err.message === 'CAPTCHA_BLOCKED' ? 'CAPTCHA_BLOCKED' : err.message;
+    log(`❌ Error: ${errorMsg}`);
+    return { success: false, error: errorMsg };
   } finally {
     await page.close().catch(() => {});
   }

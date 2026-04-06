@@ -1,4 +1,4 @@
-const { startProfile, stopProfile, stopAllProfiles } = require('../services/multilogin');
+const { startProfile, stopProfile, stopAllProfiles, unlockProfiles } = require('../services/multilogin');
 const { runPurchase } = require('../services/shein-automation');
 const { cleanupOldScreenshots } = require('../utils/screenshot-manager');
 
@@ -8,6 +8,7 @@ async function abortBatch() {
   abortFlag = true;
   console.log(`[Batch] 🛑 Abort signal dispatched, clearing queue and terminating browsers...`);
   await stopAllProfiles(); 
+  await unlockProfiles();
 }
 
 /**
@@ -46,20 +47,22 @@ async function runBatch({ tasks, concurrency = 3, credentials, onTaskUpdate }) {
       }
     };
 
-    const failAll = (msg) => {
+    const failRemaining = (msg) => {
       console.error(`[${profile.label}] ${msg}`);
       for (const t of groupTasks) {
-        onTaskUpdate(t.taskId, 'error', msg);
+        if (!t.started) {
+          onTaskUpdate(t.taskId, 'error', msg);
+        }
       }
     };
 
     try {
       if (!profile.folderId) {
-        failAll('❌ Folder ID is not configured. Go to Settings and enter your Folder ID.');
+        failRemaining('❌ Folder ID is not configured. Go to Settings and enter your Folder ID.');
         return;
       }
       if (!profile.profileId) {
-        failAll('❌ Profile ID is missing. Go to Profiles tab and add your profile IDs.');
+        failRemaining('❌ Profile ID is missing. Go to Profiles tab and add your profile IDs.');
         return;
       }
 
@@ -97,7 +100,13 @@ async function runBatch({ tasks, concurrency = 3, credentials, onTaskUpdate }) {
           if (result.success) {
             onTaskUpdate(t.taskId, 'success', '✅ Purchase completed successfully');
           } else {
-            onTaskUpdate(t.taskId, 'error', `❌ Purchase failed: ${result.error}`);
+            if (result.error === 'CAPTCHA_BLOCKED') {
+               onTaskUpdate(t.taskId, 'error', `❌ Blocked by Captcha`);
+               failRemaining(`❌ Profile hit Captcha. Skipping remaining products.`);
+               break; // Thoát vòng lặp sản phẩm, đổi sang profile tiếp theo
+            } else {
+               onTaskUpdate(t.taskId, 'error', `❌ Purchase failed: ${result.error}`);
+            }
           }
         } catch (err) {
           onTaskUpdate(t.taskId, 'error', `❌ Fatal error: ${err.message}`);
@@ -105,7 +114,7 @@ async function runBatch({ tasks, concurrency = 3, credentials, onTaskUpdate }) {
       }
 
     } catch (err) {
-      failAll(`❌ Profile Error: ${err.message}`);
+      failRemaining(`❌ Profile Error: ${err.message}`);
     } finally {
       runningGroups.delete(profile.profileId);
       if (browserURL) {
