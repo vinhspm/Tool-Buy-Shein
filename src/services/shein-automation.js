@@ -56,6 +56,7 @@ async function navigateWithRetry(page, url, log) {
   if (await detectCaptcha(page)) {
     log(`🚨 Phát hiện hệ thống kiểm tra Bots / Captcha chặn trang! Bắt đầu vượt rào...`);
     // await solveGeetestV4(page, log);
+    await takeStructuredScreenshot(page, 'captcha_detected', profileLabel, productTitle);
     throw new Error('CAPTCHA_BLOCKED');
   }
 }
@@ -77,14 +78,14 @@ async function selectColor(page, colorName, log) {
           (title && title.includes(normalized)) || 
           (dataName && dataName.includes(normalized))) {
         await opt.click();
-        await humanDelay(500, 1200);
+        await humanDelay(3000, 5000);
         return true;
       }
     }
 
     // Fallback: search by text content
     await page.locator(`[class*="color-item"]:has-text("${colorName}")`).first().click({ timeout: 5000 });
-    await humanDelay(500, 1000);
+    await humanDelay(3000, 5000);
     return true;
   } catch (err) {
     log(`⚠️ Color "${colorName}" not found or error occurred, skipping.`);
@@ -157,19 +158,36 @@ async function getProductTitle(page, log) {
 }
 
 // Cleanup mismatched items from the cart
-async function cleanupCartItems(page, targetTitle, log) {
+async function cleanupCartItemsBatch(page, addedProducts, log) {
   log(`🗑️ Verifying cart items. Scanning for non-matching products to remove...`);
+  if (!addedProducts || addedProducts.length === 0) return;
   try {
-    const cartItems = await page.$$('a.bsc-cart-item-goods-title__content');
+    // Collect specific product identifiers
+    const titleElements = await page.$$('a.bsc-cart-item-goods-title__content');
     let removedCount = 0;
     
-    for (const item of cartItems) {
-      const itemText = (await item.textContent() || '').trim();
+    // Reverse iterate handles DOM shifting when deleting items
+    for (let i = titleElements.length - 1; i >= 0; i--) {
+      const itemText = (await titleElements[i].textContent() || '').trim();
       
-      if (targetTitle && !itemText.includes(targetTitle)) {
+      // Navigate up to container to locate its variation text
+      const containerHandle = await titleElements[i].evaluateHandle(el => el.closest('div.bsc-cart-item, li[class*="cart-item"], div[class*="cart-item-main"]') || el.parentElement.parentElement);
+      
+      const containerText = (await containerHandle.evaluate(el => el.innerText) || '').toLowerCase();
+      
+      // Is this cart item one of the targets we just added?
+      const isMatch = addedProducts.some(ap => {
+         const tMatch = itemText.includes(ap.title);
+         const cMatch = ap.product.color ? containerText.includes(String(ap.product.color).toLowerCase()) : true;
+         // TODO: Placeholder selector to refine size text search if innerText fails
+         const sMatch = ap.product.size ? containerText.includes(String(ap.product.size).toLowerCase()) : true;
+         return tMatch && cMatch && sMatch;
+      });
+
+      if (!isMatch) {
          log(`🗑️ Found mismatching item in cart, deleting...`);
          
-         const trashBtn = await item.$('.icon-delete, .del-btn, .j-delete-goods, svg[class*="trash"], [class*="delete"], button[aria-label*="delete" i]');
+         const trashBtn = await containerHandle.$('.icon-delete, .del-btn, .j-delete-goods, svg[class*="trash"], [class*="delete"], button[aria-label*="delete" i]');
          if (trashBtn) {
            await trashBtn.click();
            await humanDelay(800, 1500);
@@ -183,7 +201,7 @@ async function cleanupCartItems(page, targetTitle, log) {
            removedCount++;
          } else {
            // Fallback to deselecting if trash icon isn't found
-           const checkbox = await item.$('input[type="checkbox"], [class*="checkbox"]');
+           const checkbox = await containerHandle.$('input[type="checkbox"], [class*="checkbox"]');
            if (checkbox) {
              const isChecked = await checkbox.isChecked().catch(()=>false);
              if (isChecked) await checkbox.click();
@@ -217,6 +235,7 @@ async function emptyEntireCart(page, log) {
   if (await detectCaptcha(page)) {
     log(`🚨 Phát hiện hệ thống kiểm tra Bots / Captcha chặn trang! Bắt đầu vượt rào...`);
     // await solveGeetestV4(page, log);
+    await takeStructuredScreenshot(page, 'captcha_detected', profileLabel, productTitle);
     throw new Error('CAPTCHA_BLOCKED');
   }
 
@@ -249,42 +268,73 @@ async function emptyEntireCart(page, log) {
   }
 }
 
-// Set quantity for target item inside cart
-async function setCartItemQuantity(page, qty, log) {
-  if (!qty || qty <= 0) return;
-  log(`🔢 Adjusting exact quantity in cart to: ${qty}`);
+// Set quantity for target items inside cart
+async function setCartItemQuantityBatch(page, addedProducts, log) {
+  log(`🔢 Adjusting exact quantity in cart for ${addedProducts.length} added products`);
   try {
-    const qtyInput = page.locator('.bsc-cart-item-goods-qty__input').first();
-    await qtyInput.waitFor({ state: 'visible', timeout: 5000 });
+    const titleElements = await page.$$('a.bsc-cart-item-goods-title__content');
     
-    // Bỏ thuộc tính readonly (nếu có)
-    await qtyInput.evaluate(node => node.removeAttribute('readonly')).catch(() => false);
+    for (const ap of addedProducts) {
+      const qty = ap.product.quantity;
+      if (!qty || qty <= 0) continue;
 
-    // Cách xóa cũ đã hoạt động ổn định: click 3 lần và Backspace
-    await qtyInput.click({ clickCount: 3 });
-    await qtyInput.press('Backspace');
-    await humanDelay(200, 400);
-    
-    // Điền số chậm
-    await qtyInput.pressSequentially(String(qty), { delay: 150 });
-    await humanDelay(500, 1000);
-    
-    // Ấn Enter BẮT ĐÍCH DANH lúc Input đang Focus (để trigger Loading trên Web)
-    await qtyInput.press('Enter');
-    
-    // Nhả focus bằng cách click ra chỗ trống
-    await page.mouse.click(10, 10);
-    
-    log(`✅ Quantity set to ${qty}`);
-    
-    // Trễ cố định để chờ Loading UI trên web
-    await humanDelay(4000, 5000); 
+      let targetContainer = null;
+      for (const titleEl of titleElements) {
+         const itemText = (await titleEl.textContent() || '').trim();
+         const containerHandle = await titleEl.evaluateHandle(el => el.closest('div.bsc-cart-item, li[class*="cart-item"], div[class*="cart-item-main"]') || el.parentElement.parentElement);
+         const containerText = (await containerHandle.evaluate(el => el.innerText) || '').toLowerCase();
+         
+         const tMatch = itemText.includes(ap.title);
+         const cMatch = ap.product.color ? containerText.includes(String(ap.product.color).toLowerCase()) : true;
+         // TODO: Placeholder selector to refine size text search if innerText fails
+         const sMatch = ap.product.size ? containerText.includes(String(ap.product.size).toLowerCase()) : true;
+         
+         if (tMatch && cMatch && sMatch) {
+            targetContainer = containerHandle;
+            break;
+         }
+      }
+      
+      if (!targetContainer) {
+        log(`⚠️ Could not find exact cart item matching ${ap.product.sku_code} | ${ap.product.color} | ${ap.product.size} for quantity update`);
+        continue;
+      }
+
+      const qtyInput = await targetContainer.$('.bsc-cart-item-goods-qty__input');
+      if (!qtyInput) {
+        log(`⚠️ Could not find input element for item ${ap.product.sku_code}`);
+        continue;
+      }
+      
+      // Bỏ thuộc tính readonly (nếu có)
+      await qtyInput.evaluate(node => node.removeAttribute('readonly')).catch(() => false);
+
+      // Cách xóa cũ đã hoạt động ổn định: click 3 lần và Backspace
+      await qtyInput.click({ clickCount: 3 });
+      await qtyInput.press('Backspace');
+      await humanDelay(200, 400);
+      
+      // Điền số chậm
+      await qtyInput.pressSequentially(String(qty), { delay: 150 });
+      await humanDelay(500, 1000);
+      
+      // Ấn Enter BẮT ĐÍCH DANH lúc Input đang Focus (để trigger Loading trên Web)
+      await qtyInput.press('Enter');
+      
+      // Nhả focus bằng cách click ra chỗ trống
+      await page.mouse.click(10, 10);
+      
+      log(`✅ Quantity set to ${qty} for ${ap.product.sku_code}`);
+      
+      // Trễ cố định để chờ Loading UI trên web
+      await humanDelay(3500, 4500);
+    }
   } catch(err) {
-    log(`⚠️ Could not modify cart quantity: ${err.message}`);
+    log(`⚠️ Could not modify multiple cart quantity: ${err.message}`);
   }
 }
 
-async function verifyOrderDetails(page, product, log, profileLabel, productTitle) {
+async function verifyOrderDetailsBatch(page, addedProducts, failedSkusAtAdd, log, profileLabel) {
   log(`⏳ Waiting for Shein to process payment and show order details...`);
   try {
     const orderTable = page.locator('table.new-order-table').first();
@@ -299,7 +349,7 @@ async function verifyOrderDetails(page, product, log, profileLabel, productTitle
 
     if (await paymentSuccess.isVisible()) {
        log(`✅ Detected "Payment Successful" screen!`);
-       await takeStructuredScreenshot(page, 'payment_successful', profileLabel, productTitle);
+       await takeStructuredScreenshot(page, 'payment_successful', profileLabel, addedProducts[0]?.title || 'batch');
        
        const viewOrderBtn = page.locator('button.pay-result-content__jump').first();
        await viewOrderBtn.waitFor({ state: 'visible', timeout: 10000 });
@@ -313,23 +363,32 @@ async function verifyOrderDetails(page, product, log, profileLabel, productTitle
     await humanDelay(1000, 2000);
     const orderText = (await orderTable.textContent() || '').toLowerCase();
     
-    const missingFields = [];
-    const { sku_code, color, size, quantity } = product;
+    const successful_skus = [];
+    const failed_skus = [...failedSkusAtAdd];
 
-    if (sku_code && !orderText.includes(String(sku_code).toLowerCase())) missingFields.push(`SKU: ${sku_code}`);
-    if (color && !orderText.includes(String(color).toLowerCase())) missingFields.push(`Color: ${color}`);
-    if (size && !orderText.includes(String(size).toLowerCase())) missingFields.push(`Size: ${size}`);
-    if (quantity && !orderText.includes(String(quantity).toLowerCase())) missingFields.push(`Quantity: ${quantity}`);
-    
-    if (missingFields.length > 0) {
-      throw new Error(`Mismatch in Order Table - Missing: ${missingFields.join(', ')}`);
+    for (const ap of addedProducts) {
+      let missingFields = [];
+      const { sku_code, color, size, quantity } = ap.product;
+
+      if (sku_code && !orderText.includes(String(sku_code).toLowerCase())) missingFields.push(`SKU: ${sku_code}`);
+      if (color && !orderText.includes(String(color).toLowerCase())) missingFields.push(`Color: ${color}`);
+      if (size && !orderText.includes(String(size).toLowerCase())) missingFields.push(`Size: ${size}`);
+      if (quantity && !orderText.includes(String(quantity).toLowerCase())) missingFields.push(`Quantity: ${quantity}`);
+      
+      if (missingFields.length > 0) {
+        log(`⚠️ SKU ${sku_code} Mismatch in Order Table - Missing: ${missingFields.join(', ')}`);
+        failed_skus.push(sku_code);
+      } else {
+        successful_skus.push(sku_code);
+      }
     }
-    
-    await takeStructuredScreenshot(page, 'order_verified_success', profileLabel, productTitle);
-    log(`✅ Order verified successfully (SKU, Size, Color, Qty matched)`);
+
+    await takeStructuredScreenshot(page, 'order_verified_result', profileLabel, addedProducts[0]?.title || 'batch');
+    return { successful_skus, failed_skus };
+
   } catch (err) {
     log(`⚠️ Order verification failed: ${err.message}`);
-    await takeStructuredScreenshot(page, 'order_verified_failed', profileLabel, productTitle);
+    await takeStructuredScreenshot(page, 'order_verified_failed', profileLabel, 'batch');
     throw new Error(`Order verification failed: ${err.message}`);
   }
 }
@@ -366,49 +425,86 @@ async function navigateToProductBySku(page, sku_code, log) {
   await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
 }
 
-// Main automation: run one product purchase for one profile
-async function runPurchase({ browserURL, product, folderId, profileId, profileLabel, log }) {
-  const { product_url, color, size, quantity, shipping_address, sku_code } = product;
-  
-  if (!sku_code) {
-    log(`❌ Error: SKU code is missing for this input. Please update the Excel file.`);
-    return { success: false, error: 'SKU code is missing.' };
+// Main automation: run product batch purchase for one profile
+async function runPurchase({ browserURL, products, folderId, profileId, profileLabel, log }) {
+  if (!products || products.length === 0) {
+    return { success: 'failed', error: 'No products provided for this batch.' };
   }
 
-  const addr = parseShippingAddress(shipping_address);
+  // Use the address from the first product, as grouping guaranteed they are the same
+  const addr = parseShippingAddress(products[0].shipping_address);
 
-  log(`🌐 Connecting to Multilogin profile browser...`);
+  log(`🌐 Connecting to Multilogin profile browser for batch sequence...`);
   const browser = await chromium.connectOverCDP(browserURL, { timeout: 15000 });
   const context = browser.contexts()[0];
   const page = await context.newPage();
+
+  let globalProductTitle = 'batch';
+  const addedProducts = [];
+  const failedSkusAtAdd = [];
 
   try {
     // Step 0: Clear Entire Cart to prevent leftovers from failed loops
     await emptyEntireCart(page, log);
 
-    // Step 1: Navigate to product via SKU Search
-    await navigateToProductBySku(page, sku_code, log);
+    // Step 1 - 4: Loop through products to add them to cart
+    for (const product of products) {
+      const { color, size, quantity, sku_code } = product;
+      if (!sku_code) {
+        log(`❌ Error: SKU code is missing for an item. Skipping...`);
+        failedSkusAtAdd.push('UNKNOWN');
+        continue;
+      }
+      
+      try {
+        log(`🔄 Processing product: ${sku_code} | Color: ${color} | Size: ${size}`);
+        await navigateToProductBySku(page, sku_code, log);
+        const productTitle = await getProductTitle(page, log);
+        globalProductTitle = productTitle || globalProductTitle; // last successful title for screenshots
 
-    // Step 2: Extract Target Product Title
-    const productTitle = await getProductTitle(page, log);
+        if (color) await selectColor(page, color, log);
+        await humanDelay(600, 1200);
+        
+        let sizeOut = false;
+        if (size) {
+           const sizeSelected = await selectSize(page, size, log);
+           if (!sizeSelected) {
+             log(`⚠️ Size/Item Sold Out or Error for ${sku_code}. Skipping this item...`);
+             sizeOut = true;
+           }
+        }
+        if (sizeOut) {
+           failedSkusAtAdd.push(sku_code);
+           continue; 
+        }
 
-    // Step 3: Select variant
-    if (color) await selectColor(page, color, log);
-    await humanDelay(600, 1200);
-    if (size) await selectSize(page, size, log);
-    await humanDelay(600, 1200);
-    await takeStructuredScreenshot(page, 'variant_selected', profileLabel, productTitle);
+        await takeStructuredScreenshot(page, 'variant_selected', profileLabel, productTitle);
 
-    // Step 4: Add to Cart (Directly)
-    log(`🛒 Clicking Add to Cart...`);
-    await dismissPromotionDialog(page, log);
-    const addToCartBtn = page.locator('button:has-text("Add to Bag"), button:has-text("Add to Cart"), .add-to-cart, [class*="add-btn"]').first();
-    await addToCartBtn.waitFor({ timeout: 10000 });
-    await addToCartBtn.click();
-    await humanDelay(3000, 5000);
-    await takeStructuredScreenshot(page, 'cart_added', profileLabel, productTitle);
+        log(`🛒 Clicking Add to Cart for ${sku_code}...`);
+        await dismissPromotionDialog(page, log);
+        const addToCartBtn = page.locator('button:has-text("Add to Bag"), button:has-text("Add to Cart"), .add-to-cart, [class*="add-btn"]').first();
+        await addToCartBtn.waitFor({ timeout: 10000 });
+        await addToCartBtn.click();
+        await humanDelay(5000, 8000);
+        await takeStructuredScreenshot(page, 'cart_added', profileLabel, productTitle);
+        
+        log(`✅ Added ${sku_code} to cart.`);
+        addedProducts.push({ product, title: productTitle });
 
-    log(`✅ Added to cart, navigating to Cart page...`);
+      } catch (err) {
+        // Exception caught specifically for THIS item, so the batch can still continue
+        if (err.message === 'CAPTCHA_BLOCKED') throw err; // critical abort
+        log(`⚠️ Failed to add ${sku_code} to cart: ${err.message}. Skipping...`);
+        failedSkusAtAdd.push(sku_code);
+      }
+    }
+
+    if (addedProducts.length === 0) {
+      log(`❌ No items were successfully added to cart. Aborting checkout.`);
+      return { success: 'failed', error: 'All items failed or were sold out.', failed_skus: failedSkusAtAdd };
+    }
+
+    log(`✅ All valid items added to cart, navigating to Cart page...`);
 
     // Step 5: Go to Cart via header icon
     await dismissPromotionDialog(page, log);
@@ -421,19 +517,20 @@ async function runPurchase({ browserURL, product, folderId, profileId, profileLa
     if (await detectCaptcha(page)) {
       log(`🚨 Phát hiện hệ thống kiểm tra Bots / Captcha chặn trang! Bắt đầu vượt rào...`);
       // await solveGeetestV4(page, log);
+      await takeStructuredScreenshot(page, 'captcha_detected', profileLabel, globalProductTitle);
       throw new Error('CAPTCHA_BLOCKED');
     }
 
-    // Step 6: Cleanup Cart & Set Quantity
-    await cleanupCartItems(page, productTitle, log);
-    await setCartItemQuantity(page, quantity, log);
-    await takeStructuredScreenshot(page, 'cart_verified', profileLabel, productTitle);
+    // Step 6: Cleanup Cart & Set Quantity Batch Mode
+    await cleanupCartItemsBatch(page, addedProducts, log);
+    await setCartItemQuantityBatch(page, addedProducts, log);
+    await takeStructuredScreenshot(page, 'cart_verified', profileLabel, globalProductTitle);
 
     // Step 7: Proceed to Checkout from Cart
     log(`📲 Clicking Checkout in Cart...`);
     await dismissPromotionDialog(page, log);
     const checkoutBtnCart = page.locator('.j-cart-check').first();
-    await checkoutBtnCart.waitFor({ timeout: 10000 });
+    await checkoutBtnCart.waitFor({ state: 'visible', timeout: 10000 });
     await checkoutBtnCart.click();
     await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
     await humanDelay(3000, 5000);
@@ -441,29 +538,44 @@ async function runPurchase({ browserURL, product, folderId, profileId, profileLa
     if (await detectCaptcha(page)) {
       log(`🚨 Phát hiện hệ thống kiểm tra Bots / Captcha chặn trang! Bắt đầu vượt rào...`);
       // await solveGeetestV4(page, log);
+      await takeStructuredScreenshot(page, 'captcha_detected', profileLabel, globalProductTitle);
       throw new Error('CAPTCHA_BLOCKED');
     }
 
     // Step 8: Handle shipping address
-    log(`📦 Managing shipping address for: ${addr.firstName} ${addr.lastName}`);
-    await handleShippingAddress(page, addr, log, productTitle, profileLabel);
+    log(`📦 Managing batch shipping address for: ${addr.firstName} ${addr.lastName}`);
+    await handleShippingAddress(page, addr, log, globalProductTitle, profileLabel);
 
     // Step 9: Final Place Order (on Checkout Page)
     log(`🎯 Placing order...`);
+    await humanDelay(3000, 5000);
     await dismissPromotionDialog(page, log);
     const placeOrderBtn = page.locator('button:has-text("Place Order"), button:has-text("Continue"), [class*="place-order"]').first();
-    await placeOrderBtn.waitFor({ timeout: 15000 });
+    await placeOrderBtn.waitFor({ state: 'visible', timeout: 15000 });
     await dismissPromotionDialog(page, log);
     await placeOrderBtn.click();
-    
+
+    await humanDelay(3000, 5000);
     await dismissPromotionDialog(page, log);
-    await verifyOrderDetails(page, product, log, profileLabel, productTitle);
-    return { success: true };
+    
+    const { successful_skus, failed_skus } = await verifyOrderDetailsBatch(page, addedProducts, failedSkusAtAdd, log, profileLabel);
+    
+    if (failed_skus.length === 0) {
+      log(`✅ All products purchased successfully!`);
+      return { success: 'full', successful_skus, failed_skus };
+    } else if (successful_skus.length > 0) {
+      log(`⚠️ Partial success: ${successful_skus.join(',')} successful, ${failed_skus.join(',')} failed.`);
+      return { success: 'partial', successful_skus, failed_skus };
+    } else {
+      log(`❌ Batch failed completely during verification.`);
+      return { success: 'failed', successful_skus, failed_skus };
+    }
 
   } catch (err) {
     const errorMsg = err.message === 'CAPTCHA_BLOCKED' ? 'CAPTCHA_BLOCKED' : err.message;
-    log(`❌ Error: ${errorMsg}`);
-    return { success: false, error: errorMsg };
+    log(`❌ Batch Error: ${errorMsg}`);
+    await takeStructuredScreenshot(page, 'batch_error', profileLabel, globalProductTitle);
+    return { success: 'failed', error: errorMsg, failed_skus: failedSkusAtAdd };
   } finally {
     await page.close().catch(() => {});
   }

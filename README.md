@@ -32,11 +32,12 @@ Automated purchasing tool for Shein using Multilogin X + Playwright.
 - Upload `.xlsx` file with columns:
   | Column | Description |
   |--------|-------------|
-  | `product_url` | Full Shein product URL |
+  | `sku_code` | SKU / Product ID |
   | `color` | Color name (e.g. `Black`) |
   | `size` | Size name (e.g. `L`) |
   | `quantity` | Number of items |
   | `shipping_address` | Name, Address, Phone, ZIP separated by newline |
+  | `shop_code` | Batch grouping ID |
 
 ### Dashboard Tab
 - Click **Start Batch** to begin

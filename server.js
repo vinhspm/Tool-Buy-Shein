@@ -8,6 +8,7 @@ const axios = require('axios');
 const md5 = require('md5');
 
 const { parseExcel } = require('./src/utils/excel-parser');
+const { parseShippingAddress } = require('./src/utils/address-parser');
 const { runBatch, abortBatch } = require('./src/workers/batch-runner');
 const { startProfile } = require('./src/services/multilogin');
 
@@ -40,6 +41,7 @@ const DEFAULT_CONFIG = {
   folderId: '',
   profiles: [],
   concurrency: 1, // Chạy tuần tự mặc định
+  maxProductsPerProfile: 30, // Giới hạn số lượng product khi rải đơn
   headless: false,
 };
 
@@ -94,28 +96,82 @@ app.get('/api/config', (req, res) => {
 app.post('/api/start', (req, res) => {
   if (isRunning) return res.status(400).json({ error: 'Already running' });
 
-  const { products, profileAssignments } = req.body;
-  // profileAssignments: [{ rowIndex, profileId, label }]
+  const { products, profiles: frontendProfiles } = req.body;
 
   if (!products?.length) return res.status(400).json({ error: 'No products provided' });
   if (!config.automationToken) return res.status(400).json({ error: 'Automation Token not configured' });
 
-  // Build tasks
-  currentTasks = products.map((product, i) => {
-    const assignment = profileAssignments?.[i] || { profileId: config.profiles[i % config.profiles.length]?.profileId, label: `Profile-${i + 1}` };
-    return {
-      taskId: `task-${i}-${Date.now()}`,
-      product,
+  // Group products into batches by shop_code and phone
+  const batches = {};
+  products.forEach(p => {
+    const addr = parseShippingAddress(p.shipping_address);
+    const phoneClean = (addr.phone || '').replace(/\s+/g, '');
+    const key = `${p.shop_code || 'no_shop'}_${phoneClean}`;
+    if (!batches[key]) batches[key] = [];
+    batches[key].push(p);
+  });
+  const groupedProducts = Object.values(batches);
+
+  // Build tasks: Allocate batches sequentially until profile hits quota
+  currentTasks = [];
+  const targetProfiles = frontendProfiles || config.profiles;
+  const maxQuota = config.maxProductsPerProfile || 30;
+
+  // 1. Initial constraint checks
+  const totalProducts = products.length;
+  const maxCapacity = targetProfiles.length * maxQuota;
+
+  if (totalProducts > maxCapacity) {
+    return res.status(400).json({ error: `Số lượng products (${totalProducts}) vượt quá sức chứa của tất cả profiles (${maxCapacity}). Vui lòng bật thêm profile hoặc tăng Max Products / Profile.` });
+  }
+
+  for (const group of groupedProducts) {
+    if (group.length > maxQuota) {
+      return res.status(400).json({ error: `Có nhóm đơn hàng chứa ${group.length} items, vượt quá giới hạn Profile limit (${maxQuota}). Giao dịch bị huỷ để tránh chia nhỏ quá mức.` });
+    }
+  }
+
+  let currentProfileIndex = 0;
+  let currentProfileProductCount = 0;
+
+  for (let fIndex = 0; fIndex < groupedProducts.length; fIndex++) {
+    const group = groupedProducts[fIndex];
+    const groupCount = group.length;
+
+    if (currentProfileProductCount > 0 && currentProfileProductCount + groupCount > maxQuota) {
+      currentProfileIndex++;
+      currentProfileProductCount = 0;
+    }
+
+    if (currentProfileIndex >= targetProfiles.length) {
+      return res.status(400).json({ error: 'Profiles allocation capacity exceeded unexpectedly.' });
+    }
+
+    const prof = targetProfiles[currentProfileIndex];
+    const skus = group.map(p => p.sku_code).join(', ');
+    
+    currentTasks.push({
+      taskId: `task-${currentProfileIndex}-${fIndex}-${Date.now()}`,
+      products: group,
+      skuLabel: skus,
       profile: {
         folderId: config.folderId,
-        profileId: assignment.profileId,
-        label: assignment.label || `Row ${product.rowIndex}`,
+        profileId: prof.profileId,
+        label: prof.label || `Profile-${currentProfileIndex + 1}`,
       },
-    };
-  });
+    });
+
+    currentProfileProductCount += groupCount;
+  }
 
   // Emit initial state
-  io.emit('tasks:init', currentTasks.map(t => ({ taskId: t.taskId, label: t.profile.label, product: t.product, status: 'pending' })));
+  io.emit('tasks:init', currentTasks.map(t => ({ 
+    taskId: t.taskId, 
+    label: t.profile.label, 
+    skuLabel: t.skuLabel,
+    itemCount: t.products.length,
+    status: 'pending' 
+  })));
   isRunning = true;
   res.json({ success: true, taskCount: currentTasks.length });
 

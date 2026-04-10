@@ -3,7 +3,7 @@ const path = require('path');
 
 /**
  * Reads an Excel (.xlsx) file and returns array of row objects.
- * Expected columns: product_url, color, size, quantity, shipping_address
+ * Expected columns: sku_code, color, size, quantity, shipping_address, shop_code
  */
 function parseExcel(filePath) {
   const workbook = XLSX.readFile(filePath);
@@ -14,13 +14,13 @@ function parseExcel(filePath) {
 
   return rows.map((row, index) => ({
     rowIndex: index + 2, // Excel row number (1-based header)
-    product_url: String(row['product_url'] || row['Product URL'] || '').trim(),
     color:       String(row['color'] || row['Color'] || '').trim(),
     size:        String(row['size'] || row['Size'] || '').trim(),
     quantity:    parseInt(row['quantity'] || row['Quantity'] || 1, 10),
     shipping_address: String(row['shipping_address'] || row['Shipping Address'] || '').trim(),
     sku_code:    String(row['sku_code'] || row['SKU Code'] || '').trim(),
-  })).filter(row => row.product_url); // skip empty rows
+    shop_code:   String(row['shop_code'] || row['Shop Code'] || '').trim(),
+  })).filter(row => row.sku_code); // skip empty rows
 }
 
 module.exports = { parseExcel };

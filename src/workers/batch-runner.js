@@ -77,35 +77,37 @@ async function runBatch({ tasks, concurrency = 3, credentials, onTaskUpdate }) {
       
       console.log(`[${profile.label}] 🔗 Browser connected at ${browserURL}`);
 
-      // Run each product sequentially in the same opened profile
+      // Run each batch task sequentially in the same opened profile
       for (const t of groupTasks) {
         if (abortFlag) break;
         t.started = true;
         
         const logTask = (msg) => {
-          console.log(`[${profile.label} | ${t.product.sku_code}] ${msg}`);
+          console.log(`[${profile.label} | ${t.skuLabel}] ${msg}`);
           onTaskUpdate(t.taskId, 'running', msg);
         };
 
         try {
           const result = await runPurchase({
             browserURL,
-            product: t.product,
+            products: t.products,
             folderId: profile.folderId,
             profileId: profile.profileId,
             profileLabel: profile.label,
             log: logTask,
           });
 
-          if (result.success) {
-            onTaskUpdate(t.taskId, 'success', '✅ Purchase completed successfully');
+          if (result.success === 'full') {
+            onTaskUpdate(t.taskId, 'success', `✅ Thành công hoàn toàn: ${result.successful_skus.join(', ')}`);
+          } else if (result.success === 'partial') {
+            onTaskUpdate(t.taskId, 'error', `⚠️ Mua được một phần: Thành công [${result.successful_skus.join(', ')}] | Thất bại [${result.failed_skus.join(', ')}]`);
           } else {
             if (result.error === 'CAPTCHA_BLOCKED') {
                onTaskUpdate(t.taskId, 'error', `❌ Blocked by Captcha`);
-               failRemaining(`❌ Profile hit Captcha. Skipping remaining products.`);
+               failRemaining(`❌ Profile hit Captcha. Skipping remaining tasks.`);
                break; // Thoát vòng lặp sản phẩm, đổi sang profile tiếp theo
             } else {
-               onTaskUpdate(t.taskId, 'error', `❌ Purchase failed: ${result.error}`);
+               onTaskUpdate(t.taskId, 'error', `❌ Thất bại hoàn toàn: ${result.error || result.failed_skus?.join(', ')}`);
             }
           }
         } catch (err) {

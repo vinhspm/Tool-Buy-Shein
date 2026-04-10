@@ -76,56 +76,25 @@ async function uploadFile(input) {
 
 function renderPreview(products) {
   const tbody = document.getElementById('preview-body');
+  document.getElementById('preview-count').textContent = `${products.length} rows`;
+  document.getElementById('preview-title').textContent = 'Preview (first 20 rows)';
 
-  // Group products on the frontend for preview UI
-  const batches = {};
-  products.forEach(p => {
-    // A simple regex just for UI grouping representing phone parsing
-    const phoneMatch = p.shipping_address.match(/(\+?\d[\d\s\-\.]{8,}\d)/) || [""];
-    const phoneClean = phoneMatch[0].replace(/\s+/g, '');
-    const key = `${p.shop_code || 'no_shop'}_${phoneClean}`;
-    if (!batches[key]) {
-      batches[key] = {
-        shop: p.shop_code || 'Chưa rõ mã',
-        phone: phoneClean || 'Chưa rõ SĐT',
-        address: p.shipping_address,
-        items: []
-      };
-    }
-    batches[key].items.push(p);
-  });
-  const groupedBatches = Object.values(batches);
-
-  document.getElementById('preview-count').textContent = `${groupedBatches.length} batches (${products.length} products)`;
-  document.getElementById('preview-title').textContent = 'Preview (first 20 batches)';
-
-  tbody.innerHTML = groupedBatches.slice(0, 20).map((b, i) => `
-    <tr class="border-b border-white/5 bg-surface-1/50 hover:bg-surface-1 transition-colors group">
-      <td class="px-4 py-4 text-slate-600 align-top">#${i + 1}</td>
-      <td class="px-4 py-4 max-w-sm align-top">
-        <div class="font-semibold text-brand-300 mb-1">🏪 Shop: ${b.shop}</div>
-        <div class="text-xs text-slate-400 line-clamp-3 leading-relaxed" title="${b.address}">${b.address}</div>
-      </td>
-      <td class="px-4 py-4 align-top">
-        <div class="flex flex-col gap-2">
-          ${b.items.map(item => `
-            <div class="flex items-center gap-3 bg-surface-2 rounded-lg p-2 border border-white/5">
-               <div class="flex-1 min-w-0">
-                  <div class="text-sm font-semibold text-slate-200 truncate mb-1">
-                    ${item.sku_code || 'Chưa rõ SKU'}
-                  </div>
-                  <div class="flex items-center gap-2">
-                    <span class="px-1.5 py-0.5 bg-surface-1 rounded border border-white/5 text-[10px] text-slate-400">🎨 ${item.color || '—'}</span>
-                    <span class="px-1.5 py-0.5 bg-surface-1 rounded border border-white/5 text-[10px] text-slate-400">📏 ${item.size || '—'}</span>
-                    <span class="px-1.5 py-0.5 bg-brand-500/10 border border-brand-500/20 text-brand-400 rounded text-[10px] font-semibold">📦 x${item.quantity}</span>
-                  </div>
-               </div>
-            </div>
-          `).join('')}
-        </div>
-      </td>
+  tbody.innerHTML = products.slice(0, 20).map((p, i) => `
+    <tr>
+      <td class="text-slate-600">${i + 1}</td>
+      <td class="max-w-xs truncate"><a href="${p.product_url}" target="_blank" class="text-brand-400 hover:underline text-xs">${shortUrl(p.product_url)}</a></td>
+      <td class="font-mono text-xs text-slate-400">${p.sku_code || '—'}</td>
+      <td><span class="px-2 py-0.5 bg-surface-1 rounded-full text-xs">${p.color || '—'}</span></td>
+      <td><span class="px-2 py-0.5 bg-surface-1 rounded-full text-xs">${p.size || '—'}</span></td>
+      <td class="text-slate-400">${p.quantity}</td>
+      <td class="text-slate-500 text-xs max-w-[160px] truncate">${p.shipping_address.replace(/\n/g, ', ')}</td>
     </tr>
   `).join('');
+}
+
+function shortUrl(url) {
+  try { return new URL(url).pathname.split('/').filter(Boolean).slice(-2).join('/') || url; }
+  catch { return url; }
 }
 
 // Drop zone drag events
@@ -194,7 +163,6 @@ async function saveSettings() {
     automationToken: document.getElementById('cfg-token').value.trim(),
     folderId: document.getElementById('cfg-folder').value.trim(),
     concurrency: parseInt(document.getElementById('cfg-concurrency').value) || 3,
-    maxProductsPerProfile: parseInt(document.getElementById('cfg-maxProductsPerProfile').value) || 30,
     headless: document.getElementById('cfg-headless').checked,
     profiles,
   };
@@ -480,7 +448,6 @@ async function loadSettings() {
     if (cfg.automationToken) document.getElementById('cfg-token').value = cfg.automationToken;
     if (cfg.folderId) document.getElementById('cfg-folder').value = cfg.folderId;
     if (cfg.concurrency) document.getElementById('cfg-concurrency').value = cfg.concurrency;
-    if (cfg.maxProductsPerProfile) document.getElementById('cfg-maxProductsPerProfile').value = cfg.maxProductsPerProfile;
     if (cfg.headless !== undefined) document.getElementById('cfg-headless').checked = cfg.headless;
     if (cfg.profiles?.length) {
       cfg.profiles.forEach(p => addProfileRow(p.profileId, p.label));
@@ -561,10 +528,12 @@ function renderTaskCard(taskId) {
         <div class="flex items-center gap-2 mb-1">
           <span class="text-base">${statusIcon[t.status] || '⏳'}</span>
           <span class="font-semibold text-white text-sm">${t.label}</span>
-          <span class="text-xs text-slate-500 truncate" title="${t.skuLabel}">${t.skuLabel}</span>
+          <span class="text-xs text-slate-500 truncate">${shortUrl(t.product?.product_url || '')}</span>
         </div>
         <div class="flex items-center gap-3 text-xs text-slate-500">
-          ${t.itemCount ? `<span>📦 ${t.itemCount} items</span>` : ''}
+          ${t.product?.color ? `<span>🎨 ${t.product.color}</span>` : ''}
+          ${t.product?.size ? `<span>📐 ${t.product.size}</span>` : ''}
+          ${t.product?.quantity > 1 ? `<span>×${t.product.quantity}</span>` : ''}
         </div>
       </div>
       <span class="px-2.5 py-1 text-xs rounded-full font-medium flex-shrink-0 ${statusBadgeClass(t.status)}">${t.status}</span>
