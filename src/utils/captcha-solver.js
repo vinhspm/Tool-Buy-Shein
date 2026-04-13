@@ -88,26 +88,63 @@ const humanDelay = (min = 300, max = 900) =>
   new Promise(r => setTimeout(r, Math.floor(Math.random() * (max - min) + min)));
 
 // Phát hiện captcha Geetest / Risk Challenge
-async function detectCaptcha(page) {
-    const url = page.url();
-    if (url.includes('/risk/') || url.includes('captcha_type')) return true;
+// Hàm đã được sửa thành vòng lặp chạy ngầm (background loop) để kiểm tra liên tục
+async function detectCaptcha(page, log) {
+    let clickCount = 0;
+    
+    // Lặp vô hạn cho đến khi page đóng
+    while (!page.isClosed()) {
+        try {
+            const url = page.url();
+            let isCaptcha = url.includes('/risk/') || url.includes('captcha_type');
 
-    // Fast check: Sử dụng pure JS để đâm xuyên ShadowDOM nhanh nhất
-    const hasCheckbox = await page.evaluate(() => {
-        // Cách 1: DOM thường
-        if (document.querySelector('.risk-one-pass-content-checkbox, .geetest_panel_box')) return true;
-        
-        // Cách 2: DOM xuyên qua Shadow Root (từ outerHTML KH cung cấp)
-        const roots = document.querySelectorAll('#one-pass-custom, [id^="self-click-"]');
-        for (const root of roots) {
-            if (root.shadowRoot && root.shadowRoot.querySelector('.risk-one-pass-content-checkbox')) {
-                return true;
+            if (!isCaptcha) {
+                // Fast check: Sử dụng pure JS để đâm xuyên ShadowDOM nhanh nhất
+                isCaptcha = await page.evaluate(() => {
+                    // Cách 1: DOM thường
+                    if (document.querySelector('.risk-one-pass-content-checkbox, .geetest_panel_box')) return true;
+                    
+                    // Cách 2: DOM xuyên qua Shadow Root (từ outerHTML KH cung cấp)
+                    const roots = document.querySelectorAll('#one-pass-custom, [id^="self-click-"]');
+                    for (const root of roots) {
+                        if (root.shadowRoot && root.shadowRoot.querySelector('.risk-one-pass-content-checkbox')) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }).catch(() => false);
+            }
+
+            if (isCaptcha) {
+                clickCount++;
+                if (clickCount > 10) {
+                    if (log) log(`🚨 Phá Captcha thất bại (vượt quá 10 lần click). Buộc dừng Profile để tránh treo!`);
+                    // Thêm flag để luồng chính nhận diện được lý do fail
+                    page.captchaBlocked = true;
+                    // Đóng page để ngắt luồng chính (Playwright sẽ ném lỗi Target Closed ở bên kia)
+                    await page.close().catch(() => {});
+                    return;
+                }
+                
+                if (log) log(`🚨 [Background] Phát hiện Captcha che màn hình! Click (10,10) để dismiss (Lần ${clickCount}/10)...`);
+                await page.mouse.click(10, 10);
+                // Đợi 1 chút sau khi click để DOM cập nhật
+                await new Promise(r => setTimeout(r, 1500));
+            } else {
+                // Reset đếm nếu không còn thấy Captcha
+                clickCount = 0;
+            }
+
+        } catch (e) {
+            // Khi `page` bị đóng, hàm `page.url()` hoặc `page.evaluate()` văng lỗi
+            if (page.isClosed()) {
+                return;
             }
         }
-        return false;
-    }).catch(() => false);
-
-    return hasCheckbox;
+        
+        // Delay interval giữa các lần kiểm tra
+        await new Promise(r => setTimeout(r, 2000));
+    }
 }
 
 // Hàm chính: Thao tác DOM + Xử lý API Captcha

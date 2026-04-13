@@ -80,6 +80,19 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
   res.json({ success: true, count: products.length, products });
 });
 
+// Proxy to fetch API tasks
+app.get('/api/shein-tasks', async (req, res) => {
+  const limit = parseInt(req.query.limit) || 10;
+  try {
+    const response = await axios.get(`https://sla.tooltik.app/inforShein/checkout-status/inProgress?limit=${limit}`);
+    res.json(response.data);
+  } catch (err) {
+    const msg = err.response?.data?.error || err.message;
+    console.error('[API Fetch Error]', msg);
+    res.status(400).json({ error: msg });
+  }
+});
+
 // Save config (persistent)
 app.post('/api/config', (req, res) => {
   config = { ...config, ...req.body };
@@ -183,6 +196,7 @@ app.post('/api/start', (req, res) => {
     onTaskUpdate: (taskId, status, message) => {
       io.emit('task:update', { taskId, status, message, time: new Date().toISOString() });
     },
+    availableProfiles: targetProfiles,
   }).then(() => {
     isRunning = false;
     io.emit('batch:complete', { time: new Date().toISOString() });

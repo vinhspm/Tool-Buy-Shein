@@ -1,5 +1,6 @@
 // ── State ────────────────────────────────────────────────────────────────────
 let uploadedProducts = [];
+let apiFetchedProducts = [];
 let tasks = {};  // taskId -> { status, label, messages[] }
 let profiles = []; // [{ profileId, label }]
 let fetchedFolders = []; // stores MLX folders
@@ -143,6 +144,104 @@ dz.addEventListener('drop', e => {
     uploadFile(document.getElementById('file-input'));
   }
 });
+
+// ── API Fetching ─────────────────────────────────────────────────────────────
+async function fetchApiTasks() {
+  const limit = document.getElementById('api-limit').value || 10;
+  const btn = document.getElementById('btn-fetch-api');
+  btn.disabled = true;
+  btn.textContent = 'Đang Kéo...';
+
+  try {
+    const res = await fetch(`/api/shein-tasks?limit=${limit}`);
+    const data = await res.json();
+    console.log(data);
+    
+    if (data.error) throw new Error(data.error);
+
+    const orders = data.orders || [];
+    
+    // Map API tasks to internal format used by batch-runner
+    apiFetchedProducts = orders.map(ord => ({
+      orderId: ord.orderId,
+      shop_code: ord.shopCode || '',
+      sku_code: ord.sku || '',
+      color: ord.color || '',
+      size: ord.size || '',
+      quantity: ord.quantity || 1,
+      shipping_address: ord.address || '',
+    }));
+
+    showToast(`✅ Đã lấy ${apiFetchedProducts.length} đơn hàng`, 'success');
+    renderApiPreview(apiFetchedProducts);
+    document.getElementById('api-preview').classList.remove('hidden');
+
+    // Auto switch to API run mode
+    document.getElementById('run-mode').value = 'api';
+  } catch (err) {
+    showToast('❌ Fetch API failed: ' + err.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = `<svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg> Kéo Data Từ API`;
+  }
+}
+
+function renderApiPreview(products) {
+  const tbody = document.getElementById('api-preview-body');
+
+  const batches = {};
+  products.forEach(p => {
+    let phoneClean = "";
+    if (!p.shipping_address.includes('\n') && p.shipping_address.includes(',')) {
+       const parts = p.shipping_address.split(',');
+       phoneClean = (parts[parts.length - 1] || '').replace(/[^\d+]/g, '');
+    } else {
+       const phoneMatch = p.shipping_address.match(/(\+?\d[\d\s\-\.]{8,}\d)/) || [""];
+       phoneClean = phoneMatch[0].replace(/\s+/g, '');
+    }
+    const key = `${p.shop_code || 'no_shop'}_${phoneClean}`;
+    if (!batches[key]) {
+      batches[key] = {
+        shop: p.shop_code || 'Chưa rõ mã',
+        phone: phoneClean || 'Chưa rõ SĐT',
+        address: p.shipping_address,
+        items: []
+      };
+    }
+    batches[key].items.push(p);
+  });
+  const groupedBatches = Object.values(batches);
+
+  document.getElementById('api-preview-count').textContent = `${groupedBatches.length} mẻ checkout (${products.length} SP)`;
+
+  tbody.innerHTML = groupedBatches.map((b, i) => `
+    <tr class="border-b border-white/5 bg-surface-1/50 hover:bg-surface-1 transition-colors group">
+      <td class="px-4 py-4 text-slate-600 align-top">#${i + 1}</td>
+      <td class="px-4 py-4 max-w-sm align-top">
+        <div class="font-semibold text-brand-300 mb-1">🏪 Shop: ${b.shop}</div>
+        <div class="text-xs text-slate-400 line-clamp-3 leading-relaxed" title="${b.address}">${b.address}</div>
+      </td>
+      <td class="px-4 py-4 align-top">
+        <div class="flex flex-col gap-2">
+          ${b.items.map(item => `
+            <div class="flex items-center gap-3 bg-surface-2 rounded-lg p-2 border border-white/5">
+               <div class="flex-1 min-w-0">
+                  <div class="text-sm font-semibold text-slate-200 truncate mb-1">
+                    <span class="text-xs text-amber-500">[${item.orderId}]</span> ${item.sku_code || 'Chưa rõ SKU'}
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <span class="px-1.5 py-0.5 bg-surface-1 rounded border border-white/5 text-[10px] text-slate-400">🎨 ${item.color || '—'}</span>
+                    <span class="px-1.5 py-0.5 bg-surface-1 rounded border border-white/5 text-[10px] text-slate-400">📏 ${item.size || '—'}</span>
+                    <span class="px-1.5 py-0.5 bg-brand-500/10 border border-brand-500/20 text-brand-400 rounded text-[10px] font-semibold">📦 x${item.quantity}</span>
+                  </div>
+               </div>
+            </div>
+          `).join('')}
+        </div>
+      </td>
+    </tr>
+  `).join('');
+}
 
 // ── Profiles ──────────────────────────────────────────────────────────────────
 function addProfileRow(id = '', label = '') {
@@ -491,11 +590,25 @@ async function loadSettings() {
 
 // ── Batch Control ─────────────────────────────────────────────────────────────
 async function startBatch() {
-  if (!uploadedProducts.length) {
-    showToast('⚠️ Upload a product Excel file first', 'info');
-    showTab('upload');
-    return;
+  const runMode = document.getElementById('run-mode').value;
+  let targetProducts = [];
+
+  if (runMode === 'excel') {
+    if (!uploadedProducts.length) {
+      showToast('⚠️ Upload a product Excel file first', 'info');
+      showTab('upload');
+      return;
+    }
+    targetProducts = uploadedProducts;
+  } else if (runMode === 'api') {
+    if (!apiFetchedProducts.length) {
+      showToast('⚠️ Fetch data from API first', 'info');
+      showTab('api');
+      return;
+    }
+    targetProducts = apiFetchedProducts;
   }
+
   if (!profiles.length) {
     showToast('⚠️ Add Multilogin profiles first', 'info');
     showTab('profiles');
@@ -506,7 +619,7 @@ async function startBatch() {
     const res = await fetch('/api/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ products: uploadedProducts, profiles }),
+      body: JSON.stringify({ products: targetProducts, profiles }),
     });
     const data = await res.json();
     if (!data.success) throw new Error(data.error);

@@ -1,6 +1,7 @@
 const { startProfile, stopProfile, stopAllProfiles, unlockProfiles } = require('../services/multilogin');
 const { runPurchase } = require('../services/shein-automation');
 const { cleanupOldScreenshots } = require('../utils/screenshot-manager');
+const axios = require('axios');
 
 let abortFlag = false;
 
@@ -15,7 +16,7 @@ async function abortBatch() {
  * Queue-based batch runner with concurrency control.
  * Each task = { taskId, product, profile: { folderId, profileId, label } }
  */
-async function runBatch({ tasks, concurrency = 3, credentials, onTaskUpdate }) {
+async function runBatch({ tasks, concurrency = 3, credentials, onTaskUpdate, availableProfiles }) {
   abortFlag = false;
   
   // Clean old screenshots before starting heavy loop
@@ -31,7 +32,43 @@ async function runBatch({ tasks, concurrency = 3, credentials, onTaskUpdate }) {
   }
 
   const queue = Array.from(profileGroups.values());
-  const runningGroups = new Set();
+  const runningGroups = new Map(); // pId => group
+  const bannedProfiles = new Set();
+
+  function shiftTasksToNextProfile(remainingTasks) {
+    const safeProfiles = (availableProfiles || []).filter(p => !bannedProfiles.has(p.profileId));
+    if (safeProfiles.length === 0) {
+      for (const t of remainingTasks) {
+         if (!t.started) onTaskUpdate(t.taskId, 'error', '❌ Hủy do hết profile dự phòng (tất cả đều dính block Captcha).');
+      }
+      return;
+    }
+    
+    // Pick the first safe profile
+    const nextProf = safeProfiles[0];
+    const pId = nextProf.profileId;
+
+    for (const t of remainingTasks) {
+        t.profile = { ...t.profile, profileId: nextProf.profileId, label: nextProf.label || pId };
+        t.started = false; // reset state
+    }
+
+    if (runningGroups.has(pId)) {
+       const activeGroup = runningGroups.get(pId);
+       activeGroup.tasks.push(...remainingTasks);
+       onTaskUpdate(remainingTasks[0].taskId, 'info', `🔄 Đã shift task sang profile đang chạy: ${nextProf.label}`);
+    } else {
+       let qGroup = queue.find(g => g.profile.profileId === pId);
+       if (qGroup) {
+          qGroup.tasks.push(...remainingTasks);
+          onTaskUpdate(remainingTasks[0].taskId, 'info', `🔄 Đã gộp task vào queue profile: ${nextProf.label}`);
+       } else {
+          const freshGroup = { profile: remainingTasks[0].profile, tasks: remainingTasks };
+          queue.push(freshGroup);
+          onTaskUpdate(remainingTasks[0].taskId, 'info', `🔄 Đã lên lịch profile mới: ${nextProf.label} để gánh task`);
+       }
+    }
+  }
 
   async function runGroup(group) {
     const { profile, tasks: groupTasks } = group;
@@ -82,9 +119,15 @@ async function runBatch({ tasks, concurrency = 3, credentials, onTaskUpdate }) {
         if (abortFlag) break;
         t.started = true;
         
+        let currentTaskStatus = 'running';
         const logTask = (msg) => {
           console.log(`[${profile.label} | ${t.skuLabel}] ${msg}`);
-          onTaskUpdate(t.taskId, 'running', msg);
+          onTaskUpdate(t.taskId, currentTaskStatus, msg);
+        };
+
+        const setTaskStatus = (status, msg) => {
+          currentTaskStatus = status;
+          onTaskUpdate(t.taskId, status, msg);
         };
 
         try {
@@ -97,21 +140,58 @@ async function runBatch({ tasks, concurrency = 3, credentials, onTaskUpdate }) {
             log: logTask,
           });
 
-          if (result.success === 'full') {
-            onTaskUpdate(t.taskId, 'success', `✅ Thành công hoàn toàn: ${result.successful_skus.join(', ')}`);
-          } else if (result.success === 'partial') {
-            onTaskUpdate(t.taskId, 'error', `⚠️ Mua được một phần: Thành công [${result.successful_skus.join(', ')}] | Thất bại [${result.failed_skus.join(', ')}]`);
+          if (result.success === 'full' || result.success === 'partial') {
+            if (result.success === 'full') {
+              setTaskStatus('success', `✅ Thành công hoàn toàn: ${result.successful_skus.join(', ')}`);
+            } else {
+              setTaskStatus('error', `⚠️ Mua được một phần: Thành công [${result.successful_skus.join(', ')}] | Thất bại [${result.failed_skus.join(', ')}]`);
+            }
+            
+            // Sync result to API
+            const successSkus = result.successful_skus || [];
+            const orderIdsToUpdate = new Set();
+            for (const p of t.products) {
+               if (p.orderId && successSkus.includes(p.sku_code)) {
+                  orderIdsToUpdate.add(p.orderId);
+               }
+            }
+            for (const oId of orderIdsToUpdate) {
+               try {
+                  const payload = {
+                    checkoutStatus: 'ordered',
+                    confirmState: 'cho_track',
+                    orderIdShein: result.orderIdShein || '',
+                    baseCost: String(result.baseCost || 0),
+                    detailOrderShein: result.detailOrderShein || {}
+                  };
+                  await axios.patch(`https://sla.tooltik.app/inforShein/checkout-status/${oId}`, payload);
+                  logTask(`✅ Đã đẩy status 'ordered' cho API OrderID: ${oId}`);
+               } catch (err) {
+                  logTask(`⚠️ Lỗi đẩy status API OrderID ${oId}: ${err.message}`);
+               }
+            }
+
           } else {
             if (result.error === 'CAPTCHA_BLOCKED') {
-               onTaskUpdate(t.taskId, 'error', `❌ Blocked by Captcha`);
-               failRemaining(`❌ Profile hit Captcha. Skipping remaining tasks.`);
-               break; // Thoát vòng lặp sản phẩm, đổi sang profile tiếp theo
+               setTaskStatus('error', `❌ Blocked by Captcha`);
+               
+               bannedProfiles.add(profile.profileId);
+               const tIndex = groupTasks.indexOf(t);
+               const remainingTasksToShift = groupTasks.slice(tIndex); // Includes current failed task to retry
+               
+               console.log(`[${profile.label}] ❌ Bị Captcha. Đang cắt ${remainingTasksToShift.length} task chuyển sang Profile khác.`);
+               
+               // Stop processing remainder of this group
+               groupTasks.length = tIndex; 
+               
+               shiftTasksToNextProfile(remainingTasksToShift);
+               break; // Thoát profile hiện tại
             } else {
-               onTaskUpdate(t.taskId, 'error', `❌ Thất bại hoàn toàn: ${result.error || result.failed_skus?.join(', ')}`);
+               setTaskStatus('error', `❌ Thất bại: ${result.error || result.failed_skus?.join(', ')}`);
             }
           }
         } catch (err) {
-          onTaskUpdate(t.taskId, 'error', `❌ Fatal error: ${err.message}`);
+          setTaskStatus('error', `❌ Fatal error: ${err.message}`);
         }
       }
 
@@ -136,7 +216,7 @@ async function runBatch({ tasks, concurrency = 3, credentials, onTaskUpdate }) {
 
       while (runningGroups.size < concurrency && queue.length > 0) {
         const group = queue.shift();
-        runningGroups.add(group.profile.profileId);
+        runningGroups.set(group.profile.profileId, group);
         runGroup(group).then(() => {
           tryStartNext();
           if (runningGroups.size === 0 && queue.length === 0) resolve();
