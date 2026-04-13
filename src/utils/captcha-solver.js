@@ -116,6 +116,7 @@ async function detectCaptcha(page, log) {
             }
 
             if (isCaptcha) {
+                page.captchaTriggered = true; // Global event flag báo hiệu Captcha proccs
                 clickCount++;
                 if (clickCount > 10) {
                     if (log) log(`🚨 Phá Captcha thất bại (vượt quá 10 lần click). Buộc dừng Profile để tránh treo!`);

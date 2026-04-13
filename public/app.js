@@ -168,7 +168,7 @@ async function fetchApiTasks() {
       sku_code: ord.sku || '',
       color: ord.color || '',
       size: ord.size || '',
-      quantity: ord.quantity || 1,
+      quantity: Number(ord.quantity || ord.qty || ord.Quantity || ord.amount || 1),
       shipping_address: ord.address || '',
     }));
 

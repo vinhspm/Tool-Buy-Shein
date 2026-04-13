@@ -49,19 +49,15 @@ async function startPromoWatcher(page, log) {
 
           if (isDialogVisible) {
             if (log) log(`🛑 [Background] Promotion popup detected! Attempting dismiss...`);
-            await dialogLocator.focus().catch(() => { });
-
+            
             // Bấm nút X nếu có
             const buttonClose = page.locator('button.sui-dialog__closebtn').first();
             if (await buttonClose.isVisible().catch(() => false)) {
               await buttonClose.click().catch(() => { });
             }
-
+            
+            await dialogLocator.focus().catch(() => { });
             await new Promise(r => setTimeout(r, 1000));
-
-            // Chiến thuật thoát thủ công: click góc ngoài rồi gõ Escape
-            await page.mouse.click(10, 10);
-            await new Promise(r => setTimeout(r, 300));
             await page.keyboard.press('Escape');
             await new Promise(r => setTimeout(r, 600));
 
@@ -83,11 +79,66 @@ async function startPromoWatcher(page, log) {
 
 
 // Navigate and solve captcha immediately if found (Fail-fast instead of loop)
-async function navigateWithRetry(page, url, log) {
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-  await humanDelay(1500, 3000);
+async function navigateWithRetry(page, url, log, maxRetries = 3) {
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await humanDelay(1500, 3000);
+      
+      // Kiểm tra xem có dính trang lỗi OOPS! của Shein ngay khi tải xong không
+      const hasError = await page.evaluate(() => {
+        const text = document.body.innerText.toLowerCase();
+        return text.includes('oops!') && text.includes('try again later');
+      }).catch(() => false);
+      
+      if (hasError) throw new Error("Shein Server Error (OOPS!) overlay detected");
 
+      return;
+    } catch (err) {
+      if (log) log(`⚠️ Navigation timeout or error on ${url}. Retrying (${i + 1}/${maxRetries})...`);
+    }
+  }
+  throw new Error(`Navigation failed after ${maxRetries} retries for URL: ${url}`);
+}
 
+// Wrapper cho các hành động sinh ra chuyển trang (Place Order, Checkout) chờ đợi bị lỗi
+async function safeActionWithRetry(page, actionFn, verifyFn, log, actionName = "Action", maxRetries = 3, tryReload = true) {
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      if (i > 0 && tryReload) {
+        if (log) log(`🔄 Reloading page before retrying [${actionName}]...`);
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+        await humanDelay(2000, 4000);
+      }
+      
+      if (log) log(`⚡ Executing: ${actionName}`);
+      await actionFn();
+      
+      if (log) log(`⏳ Waiting for verification of: ${actionName}`);
+      
+      // Đợi verify, nếu gặp trang lỗi OOPS thì fail-fast qua promise custom
+      const verifyPromise = verifyFn();
+      
+      const errorCheckPromise = async () => {
+        // Liên tục check DOM 5 lần trong lúc chờ (giúp fail-fast trước khi timeout)
+        for (let j = 0; j < 5; j++) {
+           await new Promise(r => setTimeout(r, 3000));
+           const hasError = await page.evaluate(() => {
+              const text = document.body.innerText.toLowerCase();
+              return text.includes('oops!') && text.includes('try again later');
+           }).catch(() => false);
+           if (hasError) throw new Error("Shein Server Error (OOPS!) dynamically detected during action verification");
+        }
+        // Trả về một promise never-resolve để không ngắt verifyPromise nếu không dính OOPS
+        return new Promise(() => {});
+      };
+
+      return await Promise.race([verifyPromise, errorCheckPromise()]);
+    } catch (err) {
+      if (log) log(`⚠️ [${actionName}] failed or timed out: ${err.message}. Retrying (${i + 1}/${maxRetries})...`);
+    }
+  }
+  throw new Error(`[${actionName}] completely failed after ${maxRetries} retries.`);
 }
 
 // Select Color variant
@@ -305,13 +356,17 @@ async function setCartItemQuantityBatch(page, addedProducts, log) {
         const itemText = (await titleEl.textContent() || '').trim();
         const containerHandle = await titleEl.evaluateHandle(el => el.closest('div.bsc-cart-item-main__wrap'));
         const containerText = (await containerHandle.evaluate(el => el.innerText) || '').toLowerCase();
+        
+        // Loại bỏ toàn bộ khoảng trắng ở cả 2 biến để dò tìm chống lỗi khác biệt format (ví dụ: "1 (1xl)" vs "1(1xl)")
+        const cleanContainerText = containerText.replace(/\s+/g, '');
+        const cleanSizeText = ap.product.size ? String(ap.product.size).toLowerCase().replace(/\s+/g, '') : '';
 
         const tMatch = itemText.includes(ap.title);
-        const cMatch = ap.product.color ? containerText.includes(String(ap.product.color).toLowerCase()) : true;
+        // const cMatch = ap.product.color ? containerText.includes(String(ap.product.color).toLowerCase()) : true;
         // TODO: Placeholder selector to refine size text search if innerText fails
-        const sMatch = ap.product.size ? containerText.includes(String(ap.product.size).toLowerCase()) : true;
+        const sMatch = ap.product.size ? cleanContainerText.includes(cleanSizeText) : true;
 
-        if (tMatch && cMatch && sMatch) {
+        if (tMatch && sMatch) {
           targetContainer = containerHandle;
           break;
         }
@@ -394,7 +449,32 @@ async function verifyOrderDetailsBatch(page, addedProducts, failedSkusAtAdd, log
 
       if (sku_code && !orderText.includes(String(sku_code).toLowerCase())) missingFields.push(`SKU: ${sku_code}`);
       // if (color && !orderText.includes(String(color).toLowerCase())) missingFields.push(`Color: ${color}`);
-      if (size && !orderText.includes(String(size).toLowerCase())) missingFields.push(`Size: ${size}`);
+      
+      if (size) {
+        let sizeMatchFound = false;
+        const sizeStr = String(size).toLowerCase();
+        
+        // 1. Thử xoá khoảng trắng (VD "4 (S)" vs "4(S)" -> "4(s)")
+        const sizeNoSpace = sizeStr.replace(/\s+/g, '');
+        const orderTextNoSpace = orderText.replace(/\s+/g, '');
+        if (orderTextNoSpace.includes(sizeNoSpace) || orderText.includes(sizeStr)) {
+          sizeMatchFound = true;
+        } else {
+          // 2. Tách lấy phần trong ngoặc (VD "4 (S)" -> lấy "s")
+          const matchInside = sizeStr.match(/\((.*?)\)/);
+          if (matchInside && matchInside[1]) {
+             const innerSize = matchInside[1].trim();
+             // Tìm cụm "(s)", " s ", hoặc "-s-" trong bảng order hiện tại
+             if (orderText.includes(`(${innerSize})`) || orderText.includes(` ${innerSize} `) || orderText.includes(`-${innerSize}-`)) {
+               sizeMatchFound = true;
+             }
+          }
+        }
+
+        if (!sizeMatchFound) {
+          missingFields.push(`Size: ${size}`);
+        }
+      }
       if (quantity && !orderText.includes(String(quantity).toLowerCase())) missingFields.push(`Quantity: ${quantity}`);
 
       if (missingFields.length > 0) {
@@ -496,7 +576,6 @@ async function runPurchase({ browserURL, products, folderId, profileId, profileL
 
         // if (color) await selectColor(page, color, log);
         await humanDelay(600, 1200);
-
         let sizeOut = false;
         if (size) {
           const sizeSelected = await selectSize(page, size, log);
@@ -513,10 +592,36 @@ async function runPurchase({ browserURL, products, folderId, profileId, profileL
         await takeStructuredScreenshot(page, 'variant_selected', profileLabel, productTitle);
 
         log(`🛒 Clicking Add to Cart for ${sku_code}...`);
-        const addToCartBtn = page.locator('button:has-text("Add to Bag"), button:has-text("Add to Cart"), .add-to-cart, [class*="add-btn"]').first();
-        await addToCartBtn.waitFor({ timeout: 10000 });
-        await addToCartBtn.click();
-        await humanDelay(5000, 8000);
+        await safeActionWithRetry(
+          page,
+          async () => {
+            page.captchaTriggered = false; // Đặt lại cờ event đầu mỗi lần thử
+
+            const addToCartBtn = page.locator('button#ProductDetailAddBtn').first();
+            await addToCartBtn.waitFor({ state: 'visible', timeout: 10000 });
+            
+            // Bắt sự kiện mini-cart loé lên ngay khi nhấn click (giúp tránh miss sự kiện 1 giây)
+            const miniCart = page.locator('div.j-bsc-mini-cart__container').first();
+            await Promise.all([
+               miniCart.waitFor({ state: 'visible', timeout: 15000 }).catch(e => {
+                 // Dựa vào global event từ captcha-solver, nếu Captcha nảy ra thì bỏ qua check mini-cart
+                 if (page.captchaTriggered) {
+                    return; 
+                 }
+                 throw e; // Nếu không có Captcha mà vẫn quá 15s ko hiện mini-cart thì throw lỗi bình thường để Retry
+               }),
+               addToCartBtn.click()
+            ]);
+          },
+          async () => {
+             await humanDelay(2000, 3000);
+          },
+          log,
+          "AddToCart",
+          3,
+          false
+        );
+
         await takeStructuredScreenshot(page, 'cart_added', profileLabel, productTitle);
 
         log(`✅ Added ${sku_code} to cart.`);
@@ -538,29 +643,38 @@ async function runPurchase({ browserURL, products, folderId, profileId, profileL
     log(`✅ All valid items added to cart, navigating to Cart page...`);
 
     // Step 5: Go to Cart via header icon
-    const cartIcon = page.locator('.bsc-mini-cart__trigger, [class*="mini-cart"], a[href*="cart"]').first();
-    await cartIcon.waitFor({ state: 'visible', timeout: 10000 });
-    await cartIcon.click();
-    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => { });
-    await humanDelay(2000, 4000);
-
-
-
-    // Step 6: Cleanup Cart & Set Quantity Batch Mode
+    await safeActionWithRetry(page,
+      async () => {
+        const cartIcon = page.locator('.bsc-mini-cart__trigger, [class*="mini-cart"], a[href*="cart"]').first();
+        await cartIcon.waitFor({ state: 'visible', timeout: 10000 });
+        await cartIcon.click();
+      },
+      async () => {
+        await page.waitForSelector('div.cart-list-wrap, div.empty-cart-container', { state: 'visible', timeout: 15000 });
+        await humanDelay(2000, 4000);
+      },
+      log,
+      "Navigate to Cart"
+    );
     await cleanupCartItemsBatch(page, addedProducts, log);
     await setCartItemQuantityBatch(page, addedProducts, log);
     await takeStructuredScreenshot(page, 'cart_verified', profileLabel, globalProductTitle);
 
     // Step 7: Proceed to Checkout from Cart
-    log(`📲 Clicking Checkout in Cart...`);
-    const checkoutBtnCart = page.locator('.j-cart-check').first();
-    await checkoutBtnCart.waitFor({ state: 'visible', timeout: 10000 });
-    await checkoutBtnCart.click();
-    await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => { });
-    await humanDelay(3000, 5000);
-
-
-
+    await safeActionWithRetry(page,
+      async () => {
+        const checkoutBtnCart = page.locator('.j-cart-check').first();
+        await checkoutBtnCart.waitFor({ state: 'visible', timeout: 10000 });
+        await checkoutBtnCart.click();
+      },
+      async () => {
+        // Đợi một trong các element tiêu biểu của màn hình Checkout hiển thị (hoặc đổi URL)
+        await page.waitForSelector('button.checkout-footer__normal-btn, button.checkout-footer__btn-normal, button:has-text("Place Order"), button:has-text("Continue"), [class*="place-order"], .sui-business-address', { state: 'visible', timeout: 20000 });
+        await humanDelay(3000, 5000);
+      },
+      log,
+      "Proceed to Checkout from Cart"
+    );
     // Step 8: Handle shipping address
     log(`📦 Managing batch shipping address for: ${addr.firstName} ${addr.lastName}`);
     await handleShippingAddress(page, addr, log, globalProductTitle, profileLabel);
@@ -583,13 +697,21 @@ async function runPurchase({ browserURL, products, folderId, profileId, profileL
     let baseCost = await extractPriceByLabel(page, "Order Total") + detailOrderShein.wallet_credit_used;
 
     await humanDelay(3000, 5000);
-    const placeOrderBtn = page.locator('button:has-text("Place Order"), button:has-text("Continue"), [class*="place-order"]').first();
-    await placeOrderBtn.waitFor({ state: 'visible', timeout: 15000 });
-    await placeOrderBtn.click();
 
-    await humanDelay(3000, 5000);
-
-    const { successful_skus, failed_skus, orderIdShein } = await verifyOrderDetailsBatch(page, addedProducts, failedSkusAtAdd, log, profileLabel);
+    // Apply safeActionWithRetry to handle Place Order and Order Verification
+    const { successful_skus, failed_skus, orderIdShein } = await safeActionWithRetry(page,
+      async () => {
+        const placeOrderBtn = page.locator('button:has-text("Place Order"), button:has-text("Continue"), [class*="place-order"]').first();
+        await placeOrderBtn.waitFor({ state: 'visible', timeout: 15000 });
+        await placeOrderBtn.click();
+        await humanDelay(3000, 5000);
+      },
+      async () => {
+        return await verifyOrderDetailsBatch(page, addedProducts, failedSkusAtAdd, log, profileLabel);
+      },
+      log,
+      "Place Order & Verify"
+    );
 
     const orderData = { orderIdShein, detailOrderShein, baseCost };
 
@@ -716,21 +838,27 @@ async function handleShippingAddress(page, addr, log, productTitle, profileLabel
       throw new Error("First Name input not found via JS querySelector. Check console for HTML dump.");
     });
 
+    // Dùng Regex bóc tách kí tự đặc biệt: Tên chỉ lấy chữ cái và dấu cách, xoá bớt dấu cách thừa
+    const cleanFirstName = String(addr.firstName || '').replace(/[^\p{L}\s]/gu, '').replace(/\s+/g, ' ').trim();
+    const cleanLastName = String(addr.lastName || '').replace(/[^\p{L}\s]/gu, '').replace(/\s+/g, ' ').trim();
+    // Số điện thoại chỉ giữ lại các kí tự số từ 0 - 9
+    const cleanPhone = String(addr.phone || '').replace(/[^\d]/g, '');
+
     // TIÊU DIỆT SỰC CẢN TRỞ READONLY CỦA SHEIN:
     // Cưỡng chế xoá thuộc tính readonly bằng Raw JS rồi mới gõ
     await firstNameHandle.evaluate(node => node.removeAttribute('readonly'));
     await firstNameHandle.focus();
-    await firstNameHandle.fill(addr.firstName);
+    await firstNameHandle.fill(cleanFirstName);
     await humanDelay(300, 600);
 
     const lastNameInput = page.locator('span:visible:has-text("Last Name") + input, span:visible:has-text("Last") + input').first();
     await lastNameInput.evaluate(node => node.removeAttribute('readonly')).catch(() => false);
-    await lastNameInput.fill(addr.lastName);
+    await lastNameInput.fill(cleanLastName);
     await humanDelay(300, 600);
 
     const phoneInput = page.locator('span:visible:has-text("Phone Number") + input, span:visible:has-text("Phone") + input').first();
     await phoneInput.evaluate(node => node.removeAttribute('readonly')).catch(() => false);
-    await phoneInput.fill(addr.phone);
+    await phoneInput.fill(cleanPhone);
     await humanDelay(300, 600);
     // 3. Search Address Input & Dropdown Loop
     const searchInput = page.locator('input.addr-search-content__core').first();

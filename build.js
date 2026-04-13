@@ -4,7 +4,7 @@ const path = require('path');
 
 const SRC_DIR = path.join(__dirname, 'src');
 const DIST_DIR = path.join(__dirname, 'build_vps');
-const ROOT_FILES_TO_COPY = ['package.json', 'package-lock.json'];
+const ROOT_FILES_TO_COPY = ['package.json', 'package-lock.json', 'config.json'];
 
 async function build() {
   console.log('🧹 Vệ sinh thư mục build cũ...');
