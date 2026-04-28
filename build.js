@@ -19,8 +19,16 @@ async function build() {
   
   console.log('🔐 Bắt đầu mã hóa (Obfuscating) các file Source Code...');
   const files = await getFiles(path.join(DIST_DIR, 'src'));
+  const skipObfuscation = ['shein-automation.js', 'captcha-solver.js'];
+
   for (const file of files) {
     if (file.endsWith('.js')) {
+      const fileName = path.basename(file);
+      if (skipObfuscation.includes(fileName)) {
+        console.log(`⏩ Bỏ qua mã hóa file thao tác DOM (Browser Context): ${fileName}`);
+        continue;
+      }
+
       const code = await fs.readFile(file, 'utf8');
       const obfuscationResult = JavaScriptObfuscator.obfuscate(code, {
         compact: true,

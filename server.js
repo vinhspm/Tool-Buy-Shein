@@ -84,7 +84,7 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
 app.get('/api/shein-tasks', async (req, res) => {
   const limit = parseInt(req.query.limit) || 10;
   try {
-    const response = await axios.get(`https://sla.tooltik.app/inforShein/checkout-status/inProgress?limit=${limit}`);
+    const response = await axios.get(`https://sla.tooltik.app/inforShein/checkout-status/pending?limit=${limit}`);
     res.json(response.data);
   } catch (err) {
     const msg = err.response?.data?.error || err.message;

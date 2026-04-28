@@ -3,6 +3,34 @@ const { runPurchase } = require('../services/shein-automation');
 const { cleanupOldScreenshots } = require('../utils/screenshot-manager');
 const axios = require('axios');
 
+async function updateApiOrderStatus(products, status, profileLabel, logTask, extraDetail = {}) {
+  const orderIdsToUpdate = new Set();
+  for (const p of products) {
+    if (p.orderId) {
+      orderIdsToUpdate.add(p.orderId.toString().trim());
+    }
+  }
+  for (const oId of orderIdsToUpdate) {
+    try {
+      const payload = {
+        checkoutStatus: status,
+        email: profileLabel,
+        ...extraDetail
+      };
+      
+      await axios.patch(`https://sla.tooltik.app/inforShein/checkout-status/${encodeURIComponent(oId)}`, payload, {
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      });
+      if (logTask) logTask(`✅ Đã đẩy status '${status}' cho API OrderID: ${oId}`);
+    } catch (err) {
+      const errDetail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+      if (logTask) logTask(`⚠️ Lỗi đẩy status API OrderID ${oId} (Status: ${status}): ${errDetail}`);
+    }
+  }
+}
+
 let abortFlag = false;
 
 async function abortBatch() {
@@ -35,11 +63,14 @@ async function runBatch({ tasks, concurrency = 3, credentials, onTaskUpdate, ava
   const runningGroups = new Map(); // pId => group
   const bannedProfiles = new Set();
 
-  function shiftTasksToNextProfile(remainingTasks) {
+  async function shiftTasksToNextProfile(remainingTasks) {
     const safeProfiles = (availableProfiles || []).filter(p => !bannedProfiles.has(p.profileId));
     if (safeProfiles.length === 0) {
       for (const t of remainingTasks) {
-         if (!t.started) onTaskUpdate(t.taskId, 'error', '❌ Hủy do hết profile dự phòng (tất cả đều dính block Captcha).');
+         if (!t.started) {
+           onTaskUpdate(t.taskId, 'error', '❌ Hủy do hết profile dự phòng (tất cả đều dính block Captcha).');
+           await updateApiOrderStatus(t.products, 'fail', t.profile.label);
+         }
       }
       return;
     }
@@ -84,22 +115,23 @@ async function runBatch({ tasks, concurrency = 3, credentials, onTaskUpdate, ava
       }
     };
 
-    const failRemaining = (msg) => {
+    const failRemaining = async (msg) => {
       console.error(`[${profile.label}] ${msg}`);
       for (const t of groupTasks) {
         if (!t.started) {
           onTaskUpdate(t.taskId, 'error', msg);
+          await updateApiOrderStatus(t.products, 'fail', profile.label);
         }
       }
     };
 
     try {
       if (!profile.folderId) {
-        failRemaining('❌ Folder ID is not configured. Go to Settings and enter your Folder ID.');
+        await failRemaining('❌ Folder ID is not configured. Go to Settings and enter your Folder ID.');
         return;
       }
       if (!profile.profileId) {
-        failRemaining('❌ Profile ID is missing. Go to Profiles tab and add your profile IDs.');
+        await failRemaining('❌ Profile ID is missing. Go to Profiles tab and add your profile IDs.');
         return;
       }
 
@@ -131,6 +163,8 @@ async function runBatch({ tasks, concurrency = 3, credentials, onTaskUpdate, ava
         };
 
         try {
+          await updateApiOrderStatus(t.products, 'inProgress', profile.label, logTask);
+
           const result = await runPurchase({
             browserURL,
             products: t.products,
@@ -145,31 +179,19 @@ async function runBatch({ tasks, concurrency = 3, credentials, onTaskUpdate, ava
               setTaskStatus('success', `✅ Thành công hoàn toàn: ${result.successful_skus.join(', ')}`);
             } else {
               setTaskStatus('error', `⚠️ Mua được một phần: Thành công [${result.successful_skus.join(', ')}] | Thất bại [${result.failed_skus.join(', ')}]`);
+              const failedProducts = t.products.filter(p => (result.failed_skus || []).includes(p.sku_code));
+              await updateApiOrderStatus(failedProducts, 'fail', profile.label, logTask);
             }
             
             // Sync result to API
             const successSkus = result.successful_skus || [];
-            const orderIdsToUpdate = new Set();
-            for (const p of t.products) {
-               if (p.orderId && successSkus.includes(p.sku_code)) {
-                  orderIdsToUpdate.add(p.orderId);
-               }
-            }
-            for (const oId of orderIdsToUpdate) {
-               try {
-                  const payload = {
-                    checkoutStatus: 'ordered',
-                    confirmState: 'cho_track',
-                    orderIdShein: result.orderIdShein || '',
-                    baseCost: String(result.baseCost || 0),
-                    detailOrderShein: result.detailOrderShein || {}
-                  };
-                  await axios.patch(`https://sla.tooltik.app/inforShein/checkout-status/${oId}`, payload);
-                  logTask(`✅ Đã đẩy status 'ordered' cho API OrderID: ${oId}`);
-               } catch (err) {
-                  logTask(`⚠️ Lỗi đẩy status API OrderID ${oId}: ${err.message}`);
-               }
-            }
+            const successProducts = t.products.filter(p => successSkus.includes(p.sku_code));
+            await updateApiOrderStatus(successProducts, 'ordered', profile.label, logTask, {
+                confirmState: 'cho_track',
+                orderIdShein: result.orderIdShein || '',
+                baseCost: String(result.baseCost || 0),
+                detailOrderShein: result.detailOrderShein || {}
+            });
 
           } else {
             if (result.error === 'CAPTCHA_BLOCKED') {
@@ -184,19 +206,21 @@ async function runBatch({ tasks, concurrency = 3, credentials, onTaskUpdate, ava
                // Stop processing remainder of this group
                groupTasks.length = tIndex; 
                
-               shiftTasksToNextProfile(remainingTasksToShift);
+               await shiftTasksToNextProfile(remainingTasksToShift);
                break; // Thoát profile hiện tại
             } else {
                setTaskStatus('error', `❌ Thất bại: ${result.error || result.failed_skus?.join(', ')}`);
+               await updateApiOrderStatus(t.products, 'fail', profile.label, logTask);
             }
           }
         } catch (err) {
           setTaskStatus('error', `❌ Fatal error: ${err.message}`);
+          await updateApiOrderStatus(t.products, 'fail', profile.label, logTask);
         }
       }
 
     } catch (err) {
-      failRemaining(`❌ Profile Error: ${err.message}`);
+      await failRemaining(`❌ Profile Error: ${err.message}`);
     } finally {
       runningGroups.delete(profile.profileId);
       if (browserURL) {
